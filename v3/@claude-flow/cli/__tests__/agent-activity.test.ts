@@ -20,6 +20,7 @@ function reader(overrides: Record<string, unknown> = {}) {
     ] },
     task_status: { taskId: 't1', createdAt, startedAt: '2026-10-06T08:30:00Z', completedAt, status: 'completed', result: { reasoning: 'PRIVATE' } },
     mission_events: { ok: true, data: { events: [], nextCursor: 0, lastEventSequence: 0, gap: false } },
+    swarm_status: { swarmId: 'swarm-test', topology: 'hierarchical', agentIds: ['researcher'] },
     ...overrides,
   };
   return vi.fn<ActivityReader>(async (tool, input) => tool === 'task_status' && data[tool] ? { ...(data[tool] as Record<string, unknown>), taskId: input.taskId } : data[tool]);
@@ -32,7 +33,7 @@ describe('recorded agent activity', () => {
     const snapshot = await collectAgentActivity(read);
     expect(snapshot.agents[0]).toMatchObject({
       agent: 'researcher', status: 'busy', assignedTask: 't1: Review source',
-      lastActivity: 'not recorded', occurredAt: 'not recorded',
+      lastActivity: 'not recorded', occurredAt: 'not recorded', swarm: 'swarm-test (hierarchical)',
     });
     expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
     expect(read.mock.calls.map(c => c[0])).not.toContain('agent_logs');
@@ -127,9 +128,10 @@ describe('activity command', () => {
   it('renders rows, timeline sources and missing communication labels', async () => {
     vi.mocked(callMCPTool).mockImplementation(reader() as typeof callMCPTool);
     await activityCommand.action!({ args: [], flags: { _: [] }, cwd: '/project', interactive: false });
-    expect(output.printTable).toHaveBeenCalledOnce();
+    expect(output.printTable).toHaveBeenCalledTimes(2);
     const lines = vi.mocked(output.writeln).mock.calls.flat().join('\n');
-    expect(lines).toContain('task_status.completedAt (record)');
+    const renderedTables = JSON.stringify(vi.mocked(output.printTable).mock.calls);
+    expect(renderedTables).toContain('task_status.completedAt (record)');
     expect(lines).toContain('Communication graph: not recorded');
   });
 });
