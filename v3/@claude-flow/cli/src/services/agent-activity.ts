@@ -18,7 +18,7 @@ export interface ActivityEvent {
 }
 export interface ActivitySnapshot {
   observedAt: string;
-  agents: Array<{ agent: string; assignedTask: string; status: string; lastActivity: string; occurredAt: string; source: string }>;
+  agents: Array<{ agent: string; swarm: string; assignedTask: string; status: string; lastActivity: string; occurredAt: string; source: string }>;
   timeline: ActivityEvent[];
   mission: { id: string; nextCursor: number; hasMore: boolean; gap: boolean } | null;
   warnings: string[];
@@ -45,6 +45,7 @@ export async function collectAgentActivity(
         : tool === 'task_status' ? typeof result.taskId !== 'string' || result.status === 'not_found'
         : tool === 'mission_events' ? result.ok !== true || !Array.isArray(record(result.data).events)
           || !Number.isSafeInteger(record(result.data).nextCursor) || !Number.isSafeInteger(record(result.data).lastEventSequence)
+        : tool === 'swarm_status' ? typeof result.swarmId !== 'string' || typeof result.topology !== 'string' || !Array.isArray(result.agentIds)
         : false;
       if (malformed) throw new Error('invalid source response');
 
@@ -55,9 +56,10 @@ export async function collectAgentActivity(
       return {};
     }
   }
-  const [agentResult, taskResult, missionResult] = await Promise.all([
+  const [agentResult, taskResult, swarmResult, missionResult] = await Promise.all([
     fetch('agent_list', { includeTerminated: true }),
     fetch('task_list', { limit }),
+    read('swarm_status', {}).then(record).catch(() => ({} as Row)),
     options.mission ? fetch('mission_events', { missionId: options.mission, afterSequence: after, limit }) : Promise.resolve({}),
   ]);
   const tasks = records(taskResult.tasks);
@@ -87,6 +89,9 @@ export async function collectAgentActivity(
     id: options.mission, nextCursor: missionData.nextCursor,
     hasMore: missionData.nextCursor < Number(missionData.lastEventSequence), gap: missionData.gap === true,
   } : null;
+  const swarmId = text(swarmResult.swarmId);
+  const swarmTopology = text(swarmResult.topology);
+  const swarmAgentIds = Array.isArray(swarmResult.agentIds) ? swarmResult.agentIds.map(text).filter((id): id is string => Boolean(id)) : [];
   if (mission?.gap) warnings.push('Mission event gap: reload with ruflo mission get --mission ' + mission.id + ' before continuing replay.');
   if (mission?.hasMore) warnings.push('More mission events: use --mission ' + mission.id + ' --after ' + mission.nextCursor + '.');
   const agents = records(agentResult.agents).map(agent => {
@@ -95,6 +100,7 @@ export async function collectAgentActivity(
     return {
       agent: text(agent.agentId) ?? 'not recorded',
       assignedTask: assigned.map(t => (text(t.taskId) ?? 'not recorded') + ': ' + (text(t.description) ?? 'not recorded')).join('; ') || 'not recorded',
+      swarm: swarmId && swarmAgentIds.includes(String(agent.agentId)) ? swarmId + ' (' + (swarmTopology ?? 'not recorded') + ')' : 'not recorded',
       status: text(agent.status) ?? 'not recorded',
       // Reassignment means task timestamps cannot identify the agent that acted.
       lastActivity: 'not recorded', occurredAt: 'not recorded', source: 'agent_list; task_list (current state)',

@@ -26,17 +26,26 @@ export const activityCommand: Command = {
       else {
         output.writeln(output.bold('Recorded agent activity — snapshot ' + snapshot.observedAt));
         output.printTable({ columns: [
-          { key: 'agent', header: 'Agent', width: 20 }, { key: 'assignedTask', header: 'Assigned task', width: 44 },
-          { key: 'status', header: 'Status', width: 16 }, { key: 'lastActivity', header: 'Last activity' },
-          { key: 'occurredAt', header: 'Occurred at' }, { key: 'source', header: 'Source' },
-        ], data: snapshot.agents });
+          { key: 'agent', header: 'Agent', width: 18 }, { key: 'swarm', header: 'Swarm', width: 28 },
+          { key: 'assignedTask', header: 'Assigned task', width: 36 },
+          { key: 'status', header: 'Status', width: 14 }, { key: 'lastActivity', header: 'Last activity', width: 18 },
+          { key: 'occurredAt', header: 'Occurred at', width: 18 },
+        ], data: snapshot.agents, maxWidth: 112 });
         if (!snapshot.agents.length) output.writeln('No agent rows returned by the source.');
         output.writeln(output.bold('Recorded task / mission timeline (newest first)'));
-        for (const event of snapshot.timeline) {
-          output.writeln((event.at ?? 'not recorded') + ' | ' + event.type + ' | task: ' + (event.taskId ?? 'not recorded')
-            + ' | status: ' + (event.status ?? 'not recorded') + ' | ' + event.source);
-        }
         if (!snapshot.timeline.length) output.writeln('Activity: not recorded.');
+        else output.printTable({ columns: [
+          { key: 'at', header: 'When', width: 25 },
+          { key: 'type', header: 'Event', width: 20 },
+          { key: 'taskId', header: 'Task', width: 18 },
+          { key: 'status', header: 'Status', width: 14 },
+          { key: 'source', header: 'Source', width: 28 },
+        ], data: snapshot.timeline.map(event => ({
+          ...event,
+          at: event.at ?? 'not recorded',
+          taskId: event.taskId ?? 'not recorded',
+          status: event.status ?? 'not recorded',
+        })), maxWidth: 112 });
         if (snapshot.mission) output.writeln('Mission cursor: ' + snapshot.mission.nextCursor);
         for (const limitation of snapshot.limitations) output.writeln(limitation);
         for (const warning of snapshot.warnings) output.printWarning(warning);
