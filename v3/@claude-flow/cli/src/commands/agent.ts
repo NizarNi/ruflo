@@ -9,6 +9,7 @@ import { select, confirm, input } from '../prompt.js';
 import { callMCPTool, MCPClientError } from '../mcp-client.js';
 import { wasmSubcommands } from './agent-wasm.js';
 import { agentPublishCommand } from './agntcy/publish.js';
+import { activityCommand } from './agent-activity.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -1077,7 +1078,7 @@ function formatLogLevel(level: string): string {
 export const agentCommand: Command = {
   name: 'agent',
   description: 'Agent management commands',
-  subcommands: [spawnCommand, listCommand, statusCommand, stopCommand, metricsCommand, poolCommand, healthCommand, logsCommand, ...wasmSubcommands, agentPublishCommand],
+  subcommands: [spawnCommand, listCommand, statusCommand, stopCommand, metricsCommand, poolCommand, healthCommand, logsCommand, activityCommand, ...wasmSubcommands, agentPublishCommand],
   options: [],
   examples: [
     { command: 'claude-flow agent spawn -t coder', description: 'Spawn a coder agent' },
@@ -1100,6 +1101,7 @@ export const agentCommand: Command = {
       `${output.highlight('metrics')}       - Show agent metrics`,
       `${output.highlight('pool')}          - Manage agent pool`,
       `${output.highlight('health')}        - Show agent health`,
+      'activity      - Snapshot of recorded agent/task/mission activity',
       `${output.highlight('logs')}          - Show agent logs`,
       `${output.highlight('wasm-status')}   - Check WASM runtime availability`,
       `${output.highlight('wasm-create')}   - Create a WASM-sandboxed agent`,
