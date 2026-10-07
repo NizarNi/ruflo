@@ -398,6 +398,7 @@ export const swarmTools: MCPTool[] = [
       type: 'object',
       properties: {
         swarmId: { type: 'string', description: 'Swarm ID (omit for most recent)' },
+        includeAll: { type: 'boolean', description: 'Return membership summaries for all recorded swarms when no swarm ID is supplied' },
       },
     },
     handler: async (input) => {
@@ -409,6 +410,12 @@ export const swarmTools: MCPTool[] = [
 
       const store = loadSwarmStore();
       const swarmId = input.swarmId as string;
+
+      if (input.includeAll === true && !swarmId) {
+        return { swarms: Object.values(store.swarms).map(swarm => ({
+          swarmId: swarm.swarmId, topology: swarm.topology, status: swarm.status, agentIds: swarm.agents,
+        })), totalSwarms: Object.keys(store.swarms).length };
+      }
 
       if (swarmId && store.swarms[swarmId]) {
         const swarm = store.swarms[swarmId];
