@@ -2,6 +2,11 @@ import type { Command } from '../types.js';
 import { output } from '../output.js';
 import { callMCPTool } from '../mcp-client.js';
 import { collectAgentActivity } from '../services/agent-activity.js';
+import { printActivityBoard, activityStatusColor as statusColor } from '../services/agent-activity-view.js';
+
+function field(label: string, value: string): void {
+  output.writeln('  ' + output.bold(label + ': ') + (value === 'not recorded' || value === 'No active assignment' ? output.dim(value) : value));
+}
 
 export const activityCommand: Command = {
   name: 'activity',
@@ -25,27 +30,36 @@ export const activityCommand: Command = {
       if (ctx.flags.format === 'json') output.printJson(snapshot);
       else {
         output.writeln(output.bold('Recorded agent activity — snapshot ' + snapshot.observedAt));
-        output.printTable({ columns: [
-          { key: 'agent', header: 'Agent', width: 18 }, { key: 'swarm', header: 'Swarm', width: 28 },
-          { key: 'assignedTask', header: 'Assigned task', width: 36 },
-          { key: 'status', header: 'Status', width: 14 }, { key: 'lastActivity', header: 'Last activity', width: 18 },
-          { key: 'occurredAt', header: 'Occurred at', width: 18 },
-        ], data: snapshot.agents, maxWidth: 112 });
+        printActivityBoard(snapshot.agents);
+        output.writeln('');
         if (!snapshot.agents.length) output.writeln('No agent rows returned by the source.');
         output.writeln(output.bold('Recorded task / mission timeline (newest first)'));
         if (!snapshot.timeline.length) output.writeln('Activity: not recorded.');
-        else output.printTable({ columns: [
-          { key: 'at', header: 'When', width: 25 },
-          { key: 'type', header: 'Event', width: 20 },
-          { key: 'taskId', header: 'Task', width: 18 },
-          { key: 'status', header: 'Status', width: 14 },
-          { key: 'source', header: 'Source', width: 28 },
-        ], data: snapshot.timeline.map(event => ({
-          ...event,
-          at: event.at ?? 'not recorded',
-          taskId: event.taskId ?? 'not recorded',
-          status: event.status ?? 'not recorded',
-        })), maxWidth: 112 });
+        else {
+          // Compact summaries on wide terminals; labelled blocks elsewhere.
+          // Avoid bordered cells for long or Unicode text whose display width varies.
+          const wide = (process.stdout.columns ?? 80) >= 120;
+          const tableFits = wide && snapshot.timeline.every(event =>
+            /^[\x20-\x7e]*$/.test(event.description ?? '') && (event.description?.length ?? 0) <= 50
+            && /^[\x20-\x7e]*$/.test(event.type) && event.type.length <= 22);
+          if (tableFits) output.printTable({ columns: [
+            { key: 'at', header: 'When (UTC)', width: 24 },
+            { key: 'type', header: 'Event', width: 22 },
+            { key: 'description', header: 'Description', width: 50 },
+          ], data: snapshot.timeline.map(event => ({
+            at: event.at ?? 'not recorded', type: output.color(event.type, 'cyan'),
+            description: event.description ?? 'not recorded',
+          })) });
+          for (const event of snapshot.timeline) {
+            output.writeln('');
+            output.writeln(output.color(event.type, 'cyan') + ' · ' + (event.at ?? 'not recorded'));
+            field('Description', event.description ?? 'not recorded');
+            field('Task ID', event.taskId ?? 'not recorded');
+            field('Event status', statusColor(event.status ?? 'not recorded'));
+            field('Source', event.source);
+          }
+        }
+        output.writeln('');
         if (snapshot.mission) output.writeln('Mission cursor: ' + snapshot.mission.nextCursor);
         for (const limitation of snapshot.limitations) output.writeln(limitation);
         for (const warning of snapshot.warnings) output.printWarning(warning);

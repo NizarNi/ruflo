@@ -2,7 +2,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { collectAgentActivity, type ActivityReader } from '../src/services/agent-activity.js';
 vi.mock('../src/mcp-client.js', () => ({ callMCPTool: vi.fn() }));
 vi.mock('../src/output.js', () => ({ output: {
-  writeln: vi.fn(), printJson: vi.fn(), printTable: vi.fn(), printWarning: vi.fn(), printError: vi.fn(), bold: (s: string) => s,
+  writeln: vi.fn(), printJson: vi.fn(), printTable: vi.fn(), printWarning: vi.fn(), printError: vi.fn(), bold: (s: string) => s, color: (s: string) => s, dim: (s: string) => s, success: (s: string) => s, error: (s: string) => s, warning: (s: string) => s,
 } }));
 import { callMCPTool } from '../src/mcp-client.js';
 import { output } from '../src/output.js';
@@ -32,7 +32,7 @@ describe('recorded agent activity', () => {
     const read = reader();
     const snapshot = await collectAgentActivity(read);
     expect(snapshot.agents[0]).toMatchObject({
-      agent: 'researcher', status: 'busy', assignedTask: 't1: Review source',
+      agent: 'researcher', status: 'busy', assignedTask: 'Review source [in_progress] (t1)',
       lastActivity: 'not recorded', occurredAt: 'not recorded', swarm: 'swarm-test (hierarchical)',
     });
     expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
@@ -107,6 +107,55 @@ describe('recorded agent activity', () => {
     expect(snapshot.warnings.join(' ')).toContain('unavailable');
   });
 
+  it('distinguishes no active assignments from unavailable or limited coverage', async () => {
+    const finished = reader({ task_list: { tasks: [
+      { taskId: 'old', status: 'cancelled', assignedTo: ['researcher'], description: 'Cancelled work' },
+    ] } });
+    expect((await collectAgentActivity(finished)).agents[0].assignedTask).toBe('No active assignment');
+    expect((await collectAgentActivity(reader({ task_list: {} }))).agents[0].assignedTask).toBe('not recorded');
+    expect((await collectAgentActivity(finished, { limit: 1 })).agents[0].assignedTask).toBe('not recorded');
+  });
+
+  it('shows role first and a pending assignment without inventing busy status', async () => {
+    const snapshot = await collectAgentActivity(reader({
+      agent_list: { agents: [{ agentId: 'tunislink-api', agentType: 'coder', status: 'idle' }] },
+      task_list: { tasks: [{ taskId: 'api', description: 'Build search endpoint', status: 'pending', assignedTo: ['tunislink-api'] }] },
+    }));
+    expect(snapshot.agents[0]).toMatchObject({ agent: 'tunislink-api', displayName: 'coder / tunislink-api', status: 'idle',
+      assignedTask: 'Build search endpoint [pending] (api)' });
+    expect(snapshot.timeline[0].description).toBe('Build search endpoint');
+  });
+
+  it('does not borrow local descriptions for mission IDs', async () => {
+    const snapshot = await collectAgentActivity(reader({ mission_events: { ok: true, data: {
+      events: [{ missionId: mission, seq: 1, type: 'task.observed', at: completedAt, payload: { taskId: 't1' } }],
+      nextCursor: 1, lastEventSequence: 1,
+    } } }), { mission });
+    expect(snapshot.timeline.find(e => e.source.startsWith('mission_events'))?.description).toBeNull();
+  });
+
+  it('retains latest completed work after an agent returns idle', async () => {
+    const snapshot = await collectAgentActivity(reader({
+      agent_list: { agents: [{ agentId: 'researcher', status: 'idle' }] },
+      task_list: { tasks: [
+        { taskId: 'new', createdAt: '2026-10-07', description: 'Newer cancelled work', status: 'cancelled', assignedTo: ['researcher'] },
+        { taskId: 'old', createdAt: '2026-10-05', description: 'Finished work', status: 'completed', assignedTo: ['researcher'] },
+      ] },
+      task_status: { completedAt: '2026-10-08', description: 'Details' },
+    }));
+    expect(snapshot.agents[0].status).toBe('idle');
+    expect(snapshot.agents[0].assignedTask).toBe('No active assignment');
+    expect(snapshot.agents[0].latestTask).toMatchObject({ taskId: 'new', status: 'cancelled' });
+  });
+
+  it('groups agents using all recorded memberships, never name prefixes', async () => {
+    const snapshot = await collectAgentActivity(reader({ swarm_status: { swarms: [
+      { swarmId: 'old', topology: 'mesh', agentIds: ['researcher'] },
+      { swarmId: 'new', topology: 'star', agentIds: [] },
+    ] } }));
+    expect(snapshot.agents[0].swarms).toEqual(['old (mesh)']);
+  });
+
   it('keeps an empty source empty', async () => {
     const snapshot = await collectAgentActivity(reader({ agent_list: { agents: [] }, task_list: { tasks: [] } }));
     expect(snapshot.agents).toEqual([]);
@@ -128,10 +177,12 @@ describe('activity command', () => {
   it('renders rows, timeline sources and missing communication labels', async () => {
     vi.mocked(callMCPTool).mockImplementation(reader() as typeof callMCPTool);
     await activityCommand.action!({ args: [], flags: { _: [] }, cwd: '/project', interactive: false });
-    expect(output.printTable).toHaveBeenCalledTimes(2);
+    // Non-TTY and narrow output uses blocks instead of oversized tables.
     const lines = vi.mocked(output.writeln).mock.calls.flat().join('\n');
-    const renderedTables = JSON.stringify(vi.mocked(output.printTable).mock.calls);
-    expect(renderedTables).toContain('task_status.completedAt (record)');
+    expect(lines).toContain('task_status.completedAt (record)');
+    expect(lines).toContain('Description: Review source');
+    expect(lines).toContain('Recorded status: busy');
+    expect(lines).toContain('Latest task');
     expect(lines).toContain('Communication graph: not recorded');
   });
 });

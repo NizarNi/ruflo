@@ -30,7 +30,7 @@ describe('activity against persisted MCP state', () => {
         return tool.handler(input);
       });
       expect(snapshot.agents.map(a => a.agent).sort()).toEqual(['coder', 'reviewer']);
-      expect(snapshot.agents.find(a => a.agent === 'coder')?.assignedTask).toBe('task1: Review snapshot');
+      expect(snapshot.agents.find(a => a.agent === 'coder')?.assignedTask).toBe('Review snapshot [in_progress] (task1)');
       expect(snapshot.timeline.map(e => e.type)).toEqual(['task.started', 'task.created']);
       expect(snapshot.agents.every(a => a.lastActivity === 'not recorded')).toBe(true);
       expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
