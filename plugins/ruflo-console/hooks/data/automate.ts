@@ -6,7 +6,9 @@
  *
  * Config values are masked as they are parsed, so a secret never reaches the state, the result panel or a log line.
  */
+import { closeOf } from './json-span'
 import { idOf, msOf, numberOf, plain, recordOf, stringOf } from './parse'
+import { countOf, ratioOf } from './safe'
 
 export type WorkflowRow = { id: string; name: string; status: string; steps: number; createdAtMs?: number }
 export type TemplateRow = { id: string; name: string; steps: number }
@@ -134,7 +136,7 @@ export function objectIn(stdout: string): Record<string, unknown> | null {
   if (start === null) return null
 
   try {
-    return recordOf(JSON.parse(text.slice(start.index, text.lastIndexOf('}') + 1)))
+    return recordOf(JSON.parse(text.slice(start.index, closeOf(text, start.index) + 1)))
   } catch {
     return null
   }
@@ -152,7 +154,7 @@ export function parseWorkflows(stdout: string): WorkflowRow[] | null {
     const id = idOf(row.workflowId)
     const createdAtMs = msOf(row.createdAt)
 
-    return id === null ? [] : [{ id, name: plain(row.name, 60) || id, status: stringOf(row.status, 20) ?? 'unknown', steps: numberOf(row.stepCount) ?? 0, ...(createdAtMs !== undefined && { createdAtMs }) }]
+    return id === null ? [] : [{ id, name: plain(row.name, 60) || id, status: stringOf(row.status, 20) ?? 'unknown', steps: countOf(row.stepCount) ?? 0, ...(createdAtMs !== undefined && { createdAtMs }) }]
   })
 }
 
@@ -165,7 +167,7 @@ export function parseTemplates(stdout: string): TemplateRow[] | null {
   return rows(value.templates).flatMap(row => {
     const id = idOf(row.templateId)
 
-    return id === null ? [] : [{ id, name: plain(row.name, 60) || id, steps: numberOf(row.stepCount) ?? 0 }]
+    return id === null ? [] : [{ id, name: plain(row.name, 60) || id, steps: countOf(row.stepCount) ?? 0 }]
   })
 }
 
@@ -207,12 +209,12 @@ export function parseAutopilot(stdout: string): AutopilotStatus | null {
 
   return {
     isEnabled: value.enabled,
-    iterations: numberOf(value.iterations) ?? 0,
-    maxIterations: numberOf(value.maxIterations) ?? 0,
-    timeoutMinutes: numberOf(value.timeoutMinutes) ?? 0,
-    done: numberOf(tasks?.completed) ?? 0,
-    total: numberOf(tasks?.total) ?? 0,
-    percent: numberOf(tasks?.percent) ?? 0,
+    iterations: countOf(value.iterations) ?? 0,
+    maxIterations: countOf(value.maxIterations) ?? 0,
+    timeoutMinutes: countOf(value.timeoutMinutes) ?? 0,
+    done: countOf(tasks?.completed) ?? 0,
+    total: countOf(tasks?.total) ?? 0,
+    percent: Math.round((ratioOf((numberOf(tasks?.percent) ?? 0) / 100) ?? 0) * 100),
     sources: (Array.isArray(value.taskSources) ? value.taskSources : []).slice(0, 6).flatMap(source => (typeof source === 'string' ? [plain(source, 24)] : [])),
   }
 }

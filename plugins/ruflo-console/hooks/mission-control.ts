@@ -9,7 +9,7 @@
  */
 import type { ActionSpec } from './actions'
 import { PHASE_NAME, plan as planOf, stageOf, type Plan, type Profile, profileOf, type Rigor, toMissionPlan } from './goap'
-import { isCapReached } from './mission-guard'
+import { capGate, capOf, refreshCost } from './mission-guard'
 import type { Host } from './host'
 import { plain, type TaskRecord } from './data/parse'
 import { isAvailable, MISSION_SKILLS, slashOf, GOALS_PLUGIN } from './mission-skills'
@@ -19,7 +19,7 @@ import type { Runner } from './runner'
 import { CLI_PREFIXES, type State } from './state'
 import type { Derived, LedgerEvent, LedgerTask, McState, McTab, MissionActions, MissionRecord } from './mission-types'
 
-import { cancelSpec, createSpec, dispatchSpec, isInflight, resultOf, setPaused } from './mission-specs'
+import { cancelSpec, createSpec, dispatchSpec, isInflight, MAX_HANDOUTS, resultOf, setPaused } from './mission-specs'
 
 export { cancelSpec, createSpec, dispatchSpec, resultOf, setPaused }
 export type { Derived, LedgerEvent, LedgerTask, McState, McTab, MissionActions, MissionRecord } from './mission-types'
@@ -89,6 +89,22 @@ export function nextTask(mission: MissionRecord, tasks: readonly TaskRecord[]): 
   if ([...status.values()].some(value => value === 'running' || value === 'failed')) return null
 
   return mission.tasks.find(task => status.get(task.id) === 'ready' && task.rufloTaskId !== undefined) ?? null
+}
+
+/**
+ * Autopilot's narrow door (ADR-470 §2.2): the mission's own rule for handing a task over, with the one-at-a-time limit widened to `cap`.
+ * Everything else is `nextTask`'s: not paused or cancelled, nothing failed, the task ready (its dependencies done) and in the task store.
+ * `running` counts tasks the store shows in progress plus tasks handed over in the last seconds (the store has not refreshed yet).
+ * `startable(m, tasks, t, 1)` is exactly `nextTask(m, tasks)?.id === t.id` as far as the running rule goes.
+ */
+export function startable(mission: MissionRecord, tasks: readonly TaskRecord[], task: LedgerTask, cap: number): boolean {
+  if (mission.paused || mission.cancelled || task.rufloTaskId === undefined || isInflight(task)) return false
+
+  const status = derive(mission, tasks)
+  const values = [...status.values()]
+  const running = mission.tasks.filter(candidate => status.get(candidate.id) === 'running' || (candidate !== task && isInflight(candidate))).length
+
+  return !values.includes('failed') && status.get(task.id) === 'ready' && running < Math.max(1, cap)
 }
 
 export const progressOf = (mission: MissionRecord, tasks: readonly TaskRecord[]) => {
@@ -167,7 +183,7 @@ export function researchOf(state: State): ResearchDraft {
 
 export const setResearch = (state: State, patch: Partial<ResearchDraft>): void => void Object.assign(researchOf(state), patch)
 
-const wired = new WeakMap<State, { host: Host; actions: MissionActions; research: () => void }>()
+const wired = new WeakMap<State, { host: Host; actions: MissionActions; research: () => void | Promise<void> }>()
 
 /** The host, actions and research start Mission Control was wired with, for the palette and the headless commands. */
 export const missionWired = (state: State) => wired.get(state)
@@ -181,7 +197,7 @@ export function missionActions(state: State, host: Host, runner: Runner): Missio
   const tasksNow = (): readonly TaskRecord[] => state.snapshot?.tasks ?? []
 
   /** Runs a slash command on the goal (or the active mission's objective) in the main UI: now when idle, prepared in the prompt box mid-turn. */
-  const launch = (slash: string, label: string, custom?: { args: string; note: string }) => {
+  const launch = (slash: string, label: string, custom?: { args: string; note: string; byModel?: boolean }) => {
     const objective = activeMission(state)?.objective ?? mc.goal
 
     // A research start brings its own, already screened arguments; every other launch works on the goal.
@@ -194,6 +210,7 @@ export function missionActions(state: State, host: Host, runner: Runner): Missio
     runner.ask(
       {
         label: `run /${slash} on the goal in the main Claude UI`,
+        ...(custom?.byModel === true && { byModel: true }),
         scope: 'controls',
         args: [],
         shows: `/${slash} ${plain(args, custom === undefined ? 100 : 200)}`,
@@ -221,6 +238,7 @@ export function missionActions(state: State, host: Host, runner: Runner): Missio
 
   /** Research start: validate, screen the question (always: it reaches the web), refuse when unsafe, then ask with the confirm in words. */
   const research = () => {
+    const byModel = state.control.viaModel
     const draft = { ...researchOf(state) }
     const question = plain(draft.question, MAX_TEXT).trim()
     const cap = capUsd(draft.cap)
@@ -230,14 +248,14 @@ export function missionActions(state: State, host: Host, runner: Runner): Missio
     if (refused !== null || cap === null || skill === undefined) return say('research', false, refused ?? 'deep-research is not a ruflo-goals skill')
     if (!isAvailable(state, skill)) return say(`${slashOf(skill)} is not available`, false, `install the ${GOALS_PLUGIN} plugin (Plugin Catalog) and /reload-plugins`)
 
-    void screenText(state, host, question).then(screen => {
+    return screenText(state, host, question).then(screen => {
       const now = researchOf(state)
 
       // The inputs moved while AIDefence looked: that verdict is about another question.
       if (now.question !== draft.question || now.depth !== draft.depth || now.cap !== draft.cap) return
       if (blocksGuidance(screen)) return say('AIDefence blocked the question', false, `${screen.detail}. Change the question.`)
 
-      launch(slashOf(skill), 'deep research', { args: researchArgs(question, draft.depth, cap), note: researchConfirm(draft.depth, cap, screen) })
+      launch(slashOf(skill), 'deep research', { args: researchArgs(question, draft.depth, cap), note: researchConfirm(draft.depth, cap, screen), byModel })
     })
   }
 
@@ -349,17 +367,19 @@ export function missionActions(state: State, host: Host, runner: Runner): Missio
 
       if (t !== '') mc.lastGuide = t
 
+      const byModel = state.control.viaModel
+
       const ask = () =>
         runner.ask(
           t === ''
             ? null
-            : { label: `send Claude: ${plain(t, 70)}`, scope: 'guide', args: [], shows: `to the Claude Code session, as a visible prompt: “${t}”`, expect: 'the instruction in the transcript', note: 'Starts a Claude Code turn (billed as any turn is).', run: async () => host.submitPrompt(t) },
+            : { label: `send Claude: ${plain(t, 70)}`, byModel, scope: 'guide', args: [], shows: `to the Claude Code session, as a visible prompt: “${t}”`, expect: 'the instruction in the transcript', note: 'Starts a Claude Code turn (billed as any turn is).', run: async () => host.submitPrompt(t) },
           'type the instruction first',
         )
 
       if (t === '' || !mc.isScreenOn) return ask()
 
-      void screenText(state, host, t).then(screen => (blocksGuidance(screen) ? say('AIDefence blocked the instruction', false, screen.detail) : ask()))
+      return screenText(state, host, t).then(screen => (blocksGuidance(screen) ? say('AIDefence blocked the instruction', false, screen.detail) : ask()))
     },
 
   }
@@ -375,8 +395,14 @@ export function advance(state: State, host: Host): void {
 
   if (mission === null || !mission.auto || state.turnActive) return
 
-  // The spend cap (ADR-443): a reading at or past the person's cap pauses the mission instead of handing out the next task.
-  if (isCapReached(state, mission)) {
+  // The spend cap (ADR-443): a fresh reading at or past the person's cap pauses the mission instead of handing out the next task; with a cap set
+  // and no fresh reading nothing is handed out (the cost probe keeps running while auto-run is on) (#3818).
+  const gate = capGate(state, mission)
+
+  // The Missions page reads the spend only while it is in front; with a cap set, auto-run reads it itself, so it never decides on an old number.
+  if (capOf(state) !== null) void refreshCost(state, host, mission)
+
+  if (gate === 'reached') {
     mission.paused = true
     record(mission, { type: 'cap.reached', note: 'spend cap reached: auto-run paused' })
     saveLedger(state, host)
@@ -385,9 +411,28 @@ export function advance(state: State, host: Host): void {
     return
   }
 
+  if (gate === 'hold') {
+    const wait = { label: 'auto-run is waiting', ok: false, detail: 'a spend cap is set and there is no fresh cost reading for this mission yet: nothing is handed out until there is one' }
+
+    if (mcOf(state).last?.label !== wait.label) mcOf(state).last = wait
+    host.invalidate()
+
+    return
+  }
+
   const task = nextTask(mission, state.snapshot?.tasks ?? [])
 
   if (task === null || isInflight(task)) return
+
+  // A task that keeps coming back unfinished is not handed out for ever: after MAX_HANDOUTS the mission pauses, with an event, and waits for the person.
+  if ((task.handouts ?? 0) >= MAX_HANDOUTS) {
+    mission.paused = true
+    record(mission, { type: 'handout.limit', taskId: task.id, note: `task ${task.id} was handed out ${MAX_HANDOUTS} times and is still not done: auto-run paused` })
+    saveLedger(state, host)
+    host.invalidate()
+
+    return
+  }
 
   void dispatchSpec(state, host, mission, task, text => host.submitPrompt(text)).run?.()
 }

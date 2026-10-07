@@ -12,6 +12,9 @@ import { navActions } from './nav-state'
 import { roomActions } from './room'
 import { roomPages } from './views/room'
 import { watchActions } from './watch'
+import { wireActivity } from './activity-live'
+import { eventsActions } from './events-ui'
+import { timelineActions } from './timeline-ui'
 import { workflowsActions } from './wf-actions'
 import { missionActions } from './mission-control'
 import { catalogActions } from './plugin-catalog'
@@ -68,8 +71,10 @@ export function actionsOf(state: State, host: Host, runner: Runner, steps: Steps
 
     // The Workflows page keeps its own cursor (run, phase, agent): /ruflo next and prev move it as j and k do.
     if (view === 'workflows') return actions.workflows.key(by > 0 ? 'j' : 'k')
+    if (view === 'events') return actions.events.move(by)
+    if (view === 'timeline') return actions.timeline.move(by)
 
-    const key = view === 'claims' ? 'claim' : view === 'swarm' || view === 'timeline' || view === 'agent' ? 'agent' : 'item'
+    const key = view === 'claims' ? 'claim' : view === 'swarm' || view === 'agent' ? 'agent' : 'item'
 
     state.select[key] += by
 
@@ -82,6 +87,7 @@ export function actionsOf(state: State, host: Host, runner: Runner, steps: Steps
 
   wireAnatole(state, host)
   wireWorkflows(state, host)
+  wireActivity(state, host)
   const actions: Actions = {
     view: setView,
     remember: () => {
@@ -378,6 +384,8 @@ export function actionsOf(state: State, host: Host, runner: Runner, steps: Steps
     loops: loopActions(state, host, runner),
     optimizer: optimizerActions(state, () => host.invalidate(), id => void runner.runById(id, ''), question => actions.ask.ask(question, 'overview')),
     watch: watchActions(state, () => host.invalidate(), (question, view) => actions.ask.ask(question, view)),
+    events: eventsActions(state, host, () => host.invalidate(), (spec, why = 'that cannot run here') => runner.ask(spec, why), question => actions.ask.ask(question, 'events')),
+    timeline: timelineActions(state, host, () => host.invalidate(), id => setView(id), (spec, why = 'that cannot run here') => runner.ask(spec, why), question => actions.ask.ask(question, 'timeline')),
     room: roomActions(state, () => host.invalidate(), (id, text) => runner.runById(id, text), () => roomPages(state)),
     navigator: navActions(state, () => host.invalidate(), view => actions.view(view)),
     catalog: catalogActions(state, host, runner, text => actions.term.load('claude', text)),

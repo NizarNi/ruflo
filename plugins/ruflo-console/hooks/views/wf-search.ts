@@ -9,8 +9,9 @@ import type { RenderElement } from 'claude-code'
 
 import { MAX_QUERY, flatHits, HIT_NAME, HIT_ORDER, MAX_SHOWN, MIN_QUERY, SCAN_CHARS, search, type Hit, type MissionTaskRef, type SearchResult } from '../data/wf-search'
 import { isBound, LOAD_BUDGET, loadRun, parsedOf, textOf } from '../data/wf-drill-io'
-import { button, clip, col, row, text, THEME } from './common'
+import { button, clip, col, text, THEME } from './common'
 import { drillOf, jumpTo, setQuery } from './wf-detail'
+import { flow } from './wf-layout'
 import { registerSlot, type SlotEnv } from './wf-slots'
 
 const memo = new WeakMap<object, { query: string; runs: number; tasks: number; texts: (string | null)[]; tails: boolean[]; result: SearchResult }>()
@@ -95,7 +96,7 @@ export function searchPanel(env: SlotEnv): RenderElement[] {
   if (result.unread > 0 && env.run !== null) {
     const run = env.run
 
-    rows.push(isBound() ? row(ctx, [button(ctx, 'wf-search-load', `Read this run's transcripts (up to ${(LOAD_BUDGET / 1_000_000).toFixed(0)} MB in all)`, () => void loadRun(run).then(() => ctx.act.workflows.setUi({})))]) : text(ctx, 'Reading them on demand needs the drill bound to the host (ADR-459).', { dimColor: true }))
+    rows.push(...(isBound() ? flow(ctx, [{ key: 'wf-search-load', label: `Read this run's transcripts (up to ${(LOAD_BUDGET / 1_000_000).toFixed(0)} MB in all)`, onPress: () => void loadRun(run).then(() => ctx.act.workflows.setUi({})) }], 'wf-search-load-row') : [text(ctx, 'Reading them on demand needs the drill bound to the host (ADR-459).', { dimColor: true })]))
   }
 
   return [col(ctx, rows, 'wf-search-panel')]

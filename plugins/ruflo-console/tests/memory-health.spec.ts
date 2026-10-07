@@ -170,7 +170,7 @@ describe('the health view', () => {
     expect(out).toMatch(/3 entries · 3 of 3 pairs compared · from key and size only, no values read/)
     expect(out).toMatch(/2 entries in 1 cluster/)
     expect(out).toMatch(/same ×2/)
-    expect(out).toMatch(/2 never recalled and not updated for 30d/)
+    expect(out).toMatch(/2 never retrieved and not updated for 30d/)
     expect(buttons).toContain('mem-health-consolidate')
   })
 })

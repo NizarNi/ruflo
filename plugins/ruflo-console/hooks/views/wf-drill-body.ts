@@ -13,6 +13,7 @@ import { SUBS, SUB_NAME, type Drill, type Sub } from '../data/wf-trail'
 import { TAIL_BYTES, TRANSCRIPT_CAP } from '../data/workflows-read'
 import { fmtTokens, type WfAgent, type WfRun } from '../data/workflows'
 import { button, clip, row, text, THEME, type Ctx } from './common'
+import { buttonWidth, flow } from './wf-layout'
 import type { LevelFilter } from '../data/wf-log'
 
 export type Model = { drill: Drill; parsed: Parsed | null; lines: LogLine[]; /** Phase scope: agents of the phase whose transcript is not in memory. */ unread: number }
@@ -35,14 +36,15 @@ function unread(ctx: Ctx, what: string, path: string | undefined, load: () => vo
 
   return [
     text(ctx, `${what} is not in memory${why}.`, { color: THEME.warn }),
-    isBound()
-      ? row(ctx, [button(ctx, 'wf-drill-load', note?.phase === 'loading' ? 'reading…' : `Read it (up to ${cap(TRANSCRIPT_CAP)}; the last ${Math.round(TAIL_BYTES / 1000)} KB of a larger file)`, load)])
-      : text(ctx, 'The page reads a live run\'s transcripts as it refreshes; a finished run\'s figures come from its record, so they are not read. Reading them on demand needs the drill bound to the host (ADR-459).', { dimColor: true }),
+    ...(isBound()
+      ? flow(ctx, [{ key: 'wf-drill-load', label: note?.phase === 'loading' ? 'reading…' : `Read it (up to ${cap(TRANSCRIPT_CAP)}; the last ${Math.round(TAIL_BYTES / 1000)} KB of a larger file)`, onPress: load }], 'wf-drill-load-row')
+      : [text(ctx, 'The page reads a live run\'s transcripts as it refreshes; a finished run\'s figures come from its record, so they are not read. Reading them on demand needs the drill bound to the host (ADR-459).', { dimColor: true })]),
   ]
 }
 
-function subTabs(ctx: Ctx, drill: Drill, ops: Ops): RenderElement {
-  return row(ctx, [text(ctx, 'view'), ...SUBS.map(sub => button(ctx, `wf-sub-${sub}`, `${drill.sub === sub ? '●' : '○'} ${SUB_NAME[sub]}`, () => ops.sub(sub)))], 'wf-subs')
+/** The tab row of one agent: Activity, Log, Files, Result on a row of their own, wrapping rather than overrunning a narrow pane. */
+function subTabs(ctx: Ctx, drill: Drill, ops: Ops): RenderElement[] {
+  return flow(ctx, SUBS.map(sub => ({ key: `wf-sub-${sub}`, label: `${drill.sub === sub ? '●' : '○'} ${SUB_NAME[sub]}`, onPress: () => ops.sub(sub) })), 'wf-subs', 'view ')
 }
 
 const sourceLine = (ctx: Ctx, agent: WfAgent, parsed: Parsed, cache: Ctx['state']['cache']): RenderElement => {
@@ -80,13 +82,13 @@ function activity(ctx: Ctx, m: Model, agent: WfAgent): RenderElement[] {
 
 function log(ctx: Ctx, m: Model, ops: Ops, isPhase: boolean): RenderElement[] {
   const window = tailWindow(m.lines, { sel: m.drill.logSel, follow: m.drill.follow })
-  const head = row(ctx, [
-    button(ctx, 'wf-log-follow', m.drill.follow ? '● following' : '○ follow', ops.follow),
-    button(ctx, 'wf-log-filter', `level: ${FILTER_WORD[m.drill.filter]}`, ops.filter),
-    button(ctx, 'wf-log-scope', isPhase ? 'scope: whole phase' : 'scope: this agent', ops.scope),
+  const head = flow(ctx, [
+    { key: 'wf-log-follow', label: m.drill.follow ? '● following' : '○ follow', onPress: ops.follow },
+    { key: 'wf-log-filter', label: `level: ${FILTER_WORD[m.drill.filter]}`, onPress: ops.filter },
+    { key: 'wf-log-scope', label: isPhase ? 'scope: whole phase' : 'scope: this agent', onPress: ops.scope },
   ], 'wf-log-head')
 
-  if (window.total === 0) return [head, text(ctx, m.drill.filter === 'all' ? 'No line in the part of the transcript read.' : `No ${FILTER_WORD[m.drill.filter]} among the lines read: change the level.`, { dimColor: true })]
+  if (window.total === 0) return [...head, text(ctx, m.drill.filter === 'all' ? 'No line in the part of the transcript read.' : `No ${FILTER_WORD[m.drill.filter]} among the lines read: change the level.`, { dimColor: true })]
 
   const rows = window.rows.map((line, i) => {
     const here = i === window.at
@@ -100,7 +102,7 @@ function log(ctx: Ctx, m: Model, ops: Ops, isPhase: boolean): RenderElement[] {
   })
 
   return [
-    head,
+    ...head,
     ...rows,
     text(ctx, `${window.above} above · ${window.below} below · line ${window.from + window.at + 1} of ${window.total}${m.unread > 0 ? ` · ${m.unread} agents of the phase not in memory` : ''}`, { dimColor: true }),
     text(ctx, 'follow pins the newest line and is re-drawn on this page\'s refresh; it is not a stream', { dimColor: true }),
@@ -117,7 +119,13 @@ function files(ctx: Ctx, m: Model, agent: WfAgent): RenderElement[] {
 
   if (wt === undefined) rows.push(text(ctx, agent.hasWorktree ? 'The agent ran in a worktree whose path its metadata does not name: no diff stat.' : 'This agent has no worktree, so there is no diff stat: the list below is only the files its tool inputs name.', { dimColor: true }))
   else if (diff !== undefined) rows.push(text(ctx, `worktree ${clip(wt, Math.max(20, ctx.columns - 40))} · ${diff.files.size + diff.extra} changed files vs HEAD (tracked files only; \`git diff --numstat\`)`, { dimColor: true }))
-  else rows.push(row(ctx, [text(ctx, `worktree ${clip(wt, Math.max(20, ctx.columns - 50))}`, { dimColor: true }), ...(isBound() ? [button(ctx, 'wf-diff-load', note?.phase === 'loading' ? 'reading…' : 'Read diff stat', () => void loadDiff(agent))] : [text(ctx, ' diff stat: n/a (host not bound)', { dimColor: true })])]))
+  else if (!isBound()) rows.push(text(ctx, `worktree ${clip(wt, Math.max(20, ctx.columns - 10))}`, { dimColor: true }), text(ctx, 'diff stat: n/a (host not bound)', { dimColor: true }))
+  else {
+    // The path takes what the button leaves, then one space, then the button: the two never touch.
+    const label = note?.phase === 'loading' ? 'reading…' : 'Read diff stat'
+
+    rows.push(row(ctx, [text(ctx, `worktree ${clip(wt, Math.max(12, ctx.columns - buttonWidth(label) - 11))} `, { dimColor: true }), button(ctx, 'wf-diff-load', label, () => void loadDiff(agent))], 'wf-diff-row'))
+  }
 
   if (note?.phase === 'failed' || note?.phase === 'none') rows.push(text(ctx, `diff stat not read: ${note.why ?? 'failed'}`, { color: THEME.warn }))
 
@@ -155,7 +163,7 @@ function result(ctx: Ctx, run: WfRun, agent: WfAgent): RenderElement[] {
     return [
       ...(agent.resultPreview !== undefined ? [text(ctx, `preview: ${agent.resultPreview}`, { dimColor: true })] : []),
       ...unread(ctx, 'The agent\'s return', `${run.id}/${agent.id}`, () => void loadResult(run, agent)).slice(0, 1),
-      ...(isBound() ? [row(ctx, [button(ctx, 'wf-result-load', note?.phase === 'loading' ? 'reading…' : 'Read the journal (up to 1.0 MB)', () => void loadResult(run, agent))])] : [text(ctx, 'Reading the journal needs the drill bound to the host (ADR-459).', { dimColor: true })]),
+      ...(isBound() ? flow(ctx, [{ key: 'wf-result-load', label: note?.phase === 'loading' ? 'reading…' : 'Read the journal (up to 1.0 MB)', onPress: () => void loadResult(run, agent) }], 'wf-result-load-row') : [text(ctx, 'Reading the journal needs the drill bound to the host (ADR-459).', { dimColor: true })]),
     ]
   }
 
@@ -178,7 +186,7 @@ export function blockRows(ctx: Ctx, title: string, block: Capped, from: number, 
 
 /** The sub-tab rows of one agent. */
 export function agentBody(ctx: Ctx, run: WfRun, agent: WfAgent, m: Model, ops: Ops): RenderElement[] {
-  const rows: RenderElement[] = [subTabs(ctx, m.drill, ops)]
+  const rows: RenderElement[] = [...subTabs(ctx, m.drill, ops)]
   const tokens = agent.tokens === undefined ? '' : ` · ${fmtTokens(agent.tokens, agent.isTokensPartial)} tok`
 
   rows.push(text(ctx, `${agent.label} · ${agent.state}${tokens}${agent.model === undefined ? '' : ` · ${agent.model}`}`, { dimColor: true }))

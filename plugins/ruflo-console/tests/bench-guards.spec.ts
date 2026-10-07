@@ -271,6 +271,9 @@ describe('the search panel on the page', () => {
   it('parses nothing for a frame with no query, and once for a query however often it is drawn again', async () => {
     const world = await worldOf(liveFiles())
 
+    // The refresh has parsed the transcripts ahead of any frame (ADR-473): this guard is about a memo that has not, so it is emptied.
+    expect(parsedStats().warmed).toBeGreaterThan(0)
+    resetDrillIo()
     frame(world)
     frame(world)
 
@@ -296,6 +299,25 @@ describe('the search panel on the page', () => {
     expect(parsedStats().parses).toBe(once)
     expect(resultOf(again.env, 'ls -la')).toBe(resultOf(again.env, 'ls -la'))
     click(again.tree, 'wf-hit-tool-0')
+  })
+
+  it('finds the transcripts a refresh parsed ahead already parsed: typing a query parses nothing new, and a redraw nothing either', async () => {
+    const world = await worldOf(liveFiles())
+    const warm = parsedStats()
+
+    expect(warm.warmed).toBeGreaterThan(0)
+
+    const idle = warm.parses
+
+    frame(world)
+    ;(inputOf(frame(world).tree)?.props.onInput as (v: string) => void)('ls -la')
+
+    const drawn = frame(world)
+
+    expect(parsedStats().parses).toBe(idle)
+    expect(resultOf(drawn.env, 'ls -la').counts.tool).toBeGreaterThan(0)
+    frame(world)
+    expect(parsedStats().parses).toBe(idle)
   })
 })
 

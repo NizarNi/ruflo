@@ -30,7 +30,7 @@ describe('registration', () => {
     expect(slotsFor('key').find(s => s.key === 't')?.id).toBe('wf-template-next')
     expect(slotsFor('action').find(s => s.hotkey === 'g')?.id).toBe('wf-template-launch')
     expect(slotsFor('key').filter(s => s.id.startsWith('drill-')).length).toBe(8)
-    const hotkeys = slotsFor('action').map(s => s.hotkey)
+    const hotkeys = slotsFor('action').flatMap(s => (s.hotkey === undefined ? [] : [s.hotkey]))
 
     expect(hotkeys).toEqual(expect.arrayContaining(['c', 'g']))
     expect(new Set([...keys, ...hotkeys]).size).toBe(keys.length + hotkeys.length)

@@ -9,6 +9,7 @@
 import { plain } from './data/parse'
 import type { Host } from './host'
 import { mcOf } from './mission-control'
+import { maskInvites } from './xruv'
 import { pluginsOfView } from './plugin-map'
 import { blocksGuidance, screenText } from './mission-options'
 import type { Runner } from './runner'
@@ -69,7 +70,7 @@ const ASSIGNED = /\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL
 
 /** The text with anything that looks like a secret replaced: keys, tokens, JWTs, bearer headers, PEM blocks, NAME=value of a secret name. */
 export function scrub(text: string): string {
-  let out = text
+  let out = maskInvites(text)
 
   for (const pattern of SECRETS) out = out.replace(pattern, '[redacted]')
 
@@ -94,9 +95,9 @@ export function askPrompt(state: State, act: Actions, view: ViewId, question: st
 
 export type AskActions = {
   /** Asks the main Claude about a view (default: the one open) with a question (default: the view's own). */
-  ask: (question?: string, view?: ViewId) => void
+  ask: (question?: string, view?: ViewId) => void | Promise<void>
   /** The same as a `/btw` aside, beside the transcript. */
-  aside: (question?: string, view?: ViewId) => void
+  aside: (question?: string, view?: ViewId) => void | Promise<void>
   /** Runs the slash command that fits the view, when the session lists it. */
   slash: (view?: ViewId) => void
   /** Runs any slash command the session lists (the Launch row), asking first. */
@@ -136,13 +137,16 @@ export function askActions(state: State, host: Host, runner: Runner, act: () => 
     mcOf(state).last = { label, ok, detail }
     host.invalidate()
   }
-  const deliver = (mode: 'visible' | 'aside', question: string | undefined, view: ViewId): void => {
+  /** Resolves once the ask is queued (after its screen, when a typed question is screened): a model call waits on it so the ask keeps its origin and level (#3815). */
+  const deliver = (mode: 'visible' | 'aside', question: string | undefined, view: ViewId): void | Promise<void> => {
+    const byModel = state.control.viaModel
     const typed = plain(question ?? '', MAX_QUESTION).trim()
     const prompt = askPrompt(state, act(), view, typed)
     const ask = () =>
       runner.ask(
         {
           label: `ask Claude about ${labelOf(view)}${mode === 'aside' ? ' (/btw aside)' : ''}`,
+          byModel,
           scope: 'ask',
           args: [],
           shows: `${mode === 'aside' ? '/btw ' : ''}“${plain(typed || VIEW_ASK[view].default, 120)}” with this view’s text as data (secrets removed) — ${prompt.length} characters`,
@@ -164,7 +168,7 @@ export function askActions(state: State, host: Host, runner: Runner, act: () => 
     // A question the person typed is screened before a model sees it; the view's own text is the console's, not theirs.
     if (typed === '' || !mcOf(state).isScreenOn) return ask()
 
-    void screenText(state, host, typed).then(screen => (blocksGuidance(screen) ? say('AIDefence blocked the question', false, screen.detail) : ask()))
+    return screenText(state, host, typed).then(screen => (blocksGuidance(screen) ? say('AIDefence blocked the question', false, screen.detail) : ask()))
   }
 
   const actions: AskActions = {

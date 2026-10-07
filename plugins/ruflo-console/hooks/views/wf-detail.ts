@@ -17,7 +17,8 @@ import { isBound, loadDiff, loadResult, loadTranscript, noteOf, parsedOf, reload
 import { filterLines, logLines, mergeLines, nextFilter, type LogLine } from '../data/wf-log'
 import { crumbs, deeper, jump, LEVEL_NAME, move, nextSub, newDrill, shallower, sync, toLevel, type Drill, type DrillLevel, type Here, type PageKey, type Step, type Sub, type Target } from '../data/wf-trail'
 import { fmtElapsed, fmtTokens } from '../data/workflows'
-import { button, clip, col, row, text, THEME } from './common'
+import { clip, col, text, THEME } from './common'
+import { crumbRow, flow } from './wf-layout'
 import { agentBody, itemBody, type Model, type Ops } from './wf-drill-body'
 import { registerSlot, type SlotEnv } from './wf-slots'
 import type { State } from '../state'
@@ -158,26 +159,21 @@ const opsOf = (env: SlotEnv, m: Model): Ops => ({
   scroll: by => commit(env, { drill: { ...m.drill, scroll: Math.max(0, m.drill.scroll + by) } }),
 })
 
-/** The breadcrumb: each level so far as a button that goes back to it, the level you are on in bold. */
+/**
+ * The breadcrumb: each level so far as a button that goes back to it, the level you are on in bold. It folds its middle crumbs before it
+ * wraps (`Runs › … › Agent: x`), keeps the last crumb whole, and leaves the sub-tab (Activity, Log, Files, Result) to the tab row below it.
+ */
 function breadcrumb(env: SlotEnv, m: Model): RenderElement {
   const { ctx } = env
   const names: Record<DrillLevel, string> = {
-    runs: env.run?.name ?? '—',
-    phases: env.phase?.title ?? '—',
-    agents: env.agent?.label ?? '—',
-    agent: '',
-    item: m.drill.sub === 'log' ? `line ${m.drill.follow ? m.lines.length : m.drill.logSel + 1}` : `call ${m.drill.callSel + 1}`,
-  }
-  const parts: RenderElement[] = []
-
-  for (const crumb of crumbs(m.drill)) {
-    const label = crumb.level === 'agent' ? crumb.label : `${LEVEL_NAME[crumb.level]}: ${clip(names[crumb.level], 16)}`
-
-    if (parts.length > 0) parts.push(text(ctx, ' › ', { dimColor: true }))
-    parts.push(crumb.isHere ? ctx.kit.Text({ bold: true, color: THEME.head, children: label }) : button(ctx, `wf-crumb-${crumb.level}`, label, () => commit(env, toLevel(m.drill, crumb.level))))
+    runs: `: ${clip(env.run?.name ?? '—', 16)}`,
+    phases: `: ${clip(env.phase?.title ?? '—', 16)}`,
+    agents: '',
+    agent: `: ${clip(env.agent?.label ?? '—', 20)}`,
+    item: m.drill.sub === 'log' ? `: line ${m.drill.follow ? m.lines.length : m.drill.logSel + 1}` : `: call ${m.drill.callSel + 1}`,
   }
 
-  return row(ctx, parts, 'wf-crumbs')
+  return crumbRow(ctx, crumbs(m.drill).map(crumb => ({ key: `wf-crumb-${crumb.level}`, label: `${LEVEL_NAME[crumb.level]}${names[crumb.level]}`, isHere: crumb.isHere, onPress: () => commit(env, toLevel(m.drill, crumb.level)) })), 'wf-crumbs', { here: label => ctx.kit.Text({ bold: true, color: THEME.head, wrap: 'truncate-end', children: label }) })
 }
 
 function list(env: SlotEnv, m: Model): RenderElement[] {
@@ -220,7 +216,8 @@ function panel(env: SlotEnv): RenderElement[] {
 
   if (!m.drill.open) {
     return [
-      row(ctx, [button(ctx, 'wf-drill-open', 'Drill into this run', () => drillKey(env, 'in')), text(ctx, `  ${hint('in', 'deeper')} · ${hint('search', 'search')} — runs › phases › agents › one agent (activity, log, files, result) › one call`, { dimColor: true })]),
+      ...flow(ctx, [{ key: 'wf-drill-open', label: 'Drill into this run', onPress: () => drillKey(env, 'in') }], 'wf-drill-open-row'),
+      text(ctx, ` ${hint('in', 'deeper')} · ${hint('search', 'search')} — runs › phases › agents › one agent (activity, log, files, result) › one call`, { dimColor: true }),
       ...(msg === undefined ? [] : [text(ctx, msg, { color: THEME.warn })]),
     ]
   }
@@ -235,7 +232,12 @@ function panel(env: SlotEnv): RenderElement[] {
 
   return [
     breadcrumb(env, m),
-    row(ctx, [button(ctx, 'wf-drill-in', '▸ deeper', () => drillKey(env, 'in')), button(ctx, 'wf-drill-out', m.drill.level === 'runs' ? '✕ close' : '◂ back', () => drillKey(env, 'out')), button(ctx, 'wf-drill-prev', '▴ prev', () => drillKey(env, 'prev')), button(ctx, 'wf-drill-next', '▾ next', () => drillKey(env, 'next'))], 'wf-drill-moves'),
+    ...flow(ctx, [
+      { key: 'wf-drill-in', label: '▸ deeper', onPress: () => drillKey(env, 'in') },
+      { key: 'wf-drill-out', label: m.drill.level === 'runs' ? '✕ close' : '◂ back', onPress: () => drillKey(env, 'out') },
+      { key: 'wf-drill-prev', label: '▴ prev', onPress: () => drillKey(env, 'prev') },
+      { key: 'wf-drill-next', label: '▾ next', onPress: () => drillKey(env, 'next') },
+    ], 'wf-drill-moves'),
     ...(msg === undefined ? [] : [text(ctx, msg, { color: THEME.warn })]),
     col(ctx, body, 'wf-drill-body'),
     text(ctx, `keys: ${hint('in', 'deeper')} · ${hint('out', 'back')} · ${hint('next', 'next')} · ${hint('prev', 'prev')} · ${hint('sub', 'next tab')} · ${hint('follow', 'follow')} · ${hint('filter', 'level')} · ${hint('search', 'search')}`, { dimColor: true }),

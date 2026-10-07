@@ -9,19 +9,19 @@
  * fails is a tick that does not act. Stopping and pausing need no confirm (they only narrow authority); starting and any change of the
  * envelope go through the confirm card (views/ap-panel.ts).
  */
-import { activeMission, derive, dispatchSpec, rufloTaskOf, type MissionRecord } from './mission-control'
+import { activeMission, dispatchSpec, startable, type LedgerTask, type MissionRecord } from './mission-control'
 import type { Host } from './host'
 import type { State } from './state'
 import { readBounded, under } from './data/files'
 import { checkNoLinks, dirOf, removeFileArgv, replaceFileArgv } from './data/wf-file'
 import { cleanText } from './data/wf-clean'
-import { trackerOf } from './data/cost-ledger'
 import { tierOf, tunablesFrom } from './data/ap-adapt'
 import { adaptPass, rotate } from './ap-maint'
 import { checkPin, type Pin } from './data/ap-pin'
 import { loadPin, setPin } from './ap-pin-live'
 import { AUTOPILOT_DIR, ENVELOPE_FILE, KILL_FILE, open, type Envelope, type Sealed, type Spend } from './data/ap-envelope'
-import { anatoleFact, classifyTask, effectOf, killSeen, preflightAll, spendArgvs, spendOf, verifyPermission, type ToolCheck } from './data/ap-guard'
+import { anatoleFact, killSeen, preflightAll, type ToolCheck } from './data/ap-guard'
+import { effectsOf, pickTask, readSpend } from './ap-pick'
 import { appendArgv, encodeLine, JOURNAL_FILE, JOURNAL_MAX_BYTES, REFUSED_WHY, startedCount, touchArgv, type JournalEvent } from './data/ap-journal'
 import { digestText, emptyLoop, foldJournal, replayJournal, skipSet, tick, type EffectFact, type Facts, type LoopState, type TaskFact } from './data/ap-loop'
 import type { Preflight } from './data/ap-loop'
@@ -32,6 +32,8 @@ const SPEND_EVERY_MS = 120_000
 const ADAPT_EVERY_MS = 600_000
 const PREFLIGHT_EVERY_MS = 60_000
 const STEP_TIMEOUT_MS = 30 * 60_000
+/** Rounds after the cap that may only park tasks (a park hands nothing over). */
+const MAX_PARKS_PER_PASS = 8
 /** A gap between ticks this long is a sleeping machine, not a slow tick. */
 const SLEEP_GAP_MS = 3 * TICK_MS
 
@@ -43,6 +45,8 @@ export type Store = {
   journalBytes: number
   spend: Spend | null
   spendAtMs: number
+  /** Why the spend is not known (no tracker, an older one, an unpriced model), or null. */
+  spendWhy: string | null
   killed: boolean
   status: string
   preflight: Record<string, Preflight>
@@ -78,7 +82,7 @@ export const activeOf = (): State | null => active
 
 const checks = new WeakMap<State, ToolCheck | undefined>()
 
-export const storeOf = (state: State): Store => stores.get(state) ?? stores.set(state, { sealed: null, envWhy: null, loop: emptyLoop(), badLines: 0, journalBytes: 0, spend: null, spendAtMs: 0, killed: false, status: 'not wired', preflight: {}, preflightAtMs: 0, hasCheck: false, adaptAtMs: 0, bootMs: Date.now(), isTicking: false, error: null, readAtMs: 0, notices: [], verified: new Map(), chain: Promise.resolve(), isTimerOn: false, pin: null, isPinLoaded: false, isPinPending: false, heldStop: null, lastTickMs: 0, slack: {} }).get(state)!
+export const storeOf = (state: State): Store => stores.get(state) ?? stores.set(state, { sealed: null, envWhy: null, loop: emptyLoop(), badLines: 0, journalBytes: 0, spend: null, spendAtMs: 0, spendWhy: null, killed: false, status: 'not wired', preflight: {}, preflightAtMs: 0, hasCheck: false, adaptAtMs: 0, bootMs: Date.now(), isTicking: false, error: null, readAtMs: 0, notices: [], verified: new Map(), chain: Promise.resolve(), isTimerOn: false, pin: null, isPinLoaded: false, isPinPending: false, heldStop: null, lastTickMs: 0, slack: {} }).get(state)!
 
 export const hostOf = (state: State): Host | undefined => hosts.get(state)
 
@@ -268,71 +272,39 @@ export async function writeEnvelope(state: State, host: Host, sealed: Sealed): P
   return result.exitCode === 0
 }
 
-/** The mission's next ready task that is not parked, denied or already stepped: the picker the loop uses. */
-export function pickTask(mission: MissionRecord, state: State, skip: ReadonlySet<string>): { ledger: MissionRecord['tasks'][number]; fact: TaskFact } | null {
-  const status = derive(mission, state.snapshot?.tasks ?? [])
-
-  // The mission's own dispatch hands out one task at a time and not past a failed one; autopilot does not pretend otherwise.
-  if ([...status.values()].some(value => value === 'running' || value === 'failed') || mission.paused) return null
-  const ledger = mission.tasks.find(task => status.get(task.id) === 'ready' && task.rufloTaskId !== undefined && !skip.has(task.id))
-
-  return ledger === undefined ? null : { ledger, fact: classifyTask(ledger.id, ledger.title, ledger.requirement) }
-}
-
-async function readSpend(state: State, host: Host, startMs: number, nowMs: number): Promise<Spend | null> {
-  const tracker = trackerOf(state)
-
-  if (tracker.kind !== 'ready') return null
-
-  const argvs = spendArgvs(tracker.root, startMs, nowMs, state.cwd)
-
-  if (argvs.hour === null || argvs.day === null || argvs.total === null) return null
-
-  try {
-    const [hour, day, total] = [await host.run(argvs.hour, 60_000), await host.run(argvs.day, 60_000), await host.run(argvs.total, 60_000)]
-
-    return spendOf({ hour: hour.stdout, day: day.stdout, total: total.stdout })
-  } catch {
-    return null
-  }
-}
-
-/** The effect of each in-flight step, from the task store AND the envelope's verify commands. The store's status alone is a claim. */
-async function effectsOf(state: State, host: Host, loop: LoopState, mission: MissionRecord | null, env: Envelope): Promise<Record<string, EffectFact>> {
-  const out: Record<string, EffectFact> = {}
+/**
+ * Hands one journaled step to the session. Looked at again HERE (a verify run can take minutes): no kill flag, the phase still running, and
+ * the journal, read within its cap, holds exactly one start for this step. The mission's own dispatch does the hand-over; only its
+ * one-at-a-time check is replaced by `startable(..., cap)`. Returns true when the prompt went.
+ */
+async function handOver(state: State, host: Host, mission: MissionRecord, task: LedgerTask, stepId: string, nowMs: number, cap: number): Promise<boolean> {
   const store = storeOf(state)
+  const at = pathOf(state, JOURNAL_FILE)
+  const size = await host.fs.stat(at).catch(() => undefined)
+  const journalNow = size === undefined || size.isLink === true || (size.size ?? JOURNAL_MAX_BYTES + 1) > JOURNAL_MAX_BYTES ? null : await host.fs.read(at).catch(() => null)
 
-  for (const step of loop.steps.filter(entry => entry.status === 'started')) {
-    const ledger = mission?.tasks.find(task => task.id === step.task)
-    const stored = ledger === undefined ? undefined : rufloTaskOf(state.snapshot?.tasks ?? [], ledger)?.status
+  if ((await killSeen(host.fs, state.cwd)) || store.loop.phase === 'stopped' || store.loop.phase === 'paused') {
+    await appendEvents(state, host, [{ t: 'step.failed', at: Date.now(), id: stepId, why: 'stopped before the hand-over' }])
 
-    if (stored === 'completed' && !store.verified.has(step.id)) {
-      let ran = 0
-      let failed = 0
-
-      // The envelope's verify commands run through the console, not the engine: where the person's settings deny the test class they are never run, and each counts as a failed check (never as a pass).
-      for (const argv of env.verify) {
-        ran += 1
-
-        // The console runs these itself, so the person's own permission rules are asked first (a refusal is a failed check, never run), and a kill flag ends the list.
-        if (store.preflight.test === 'deny' || (await verifyPermission(checks.get(state), argv)) === 'blocked' || (await killSeen(host.fs, state.cwd)) || store.loop.phase === 'stopped') {
-          failed += 1
-          continue
-        }
-
-        const result = await host.run(argv, 10 * 60_000).catch(() => ({ exitCode: 1 }))
-
-        if (result.exitCode !== 0) failed += 1
-      }
-
-      store.verified.set(step.id, effectOf(stored, { ran, failed }))
-      if (store.verified.size > 500) for (const key of [...store.verified.keys()].slice(0, 100)) store.verified.delete(key)
-    }
-
-    out[step.id] = stored === 'completed' ? (store.verified.get(step.id) ?? 'unknown') : stored === 'failed' || stored === 'cancelled' ? 'failed' : stored === 'pending' || stored === undefined ? 'absent' : 'unknown'
+    return false
   }
 
-  return out
+  if (journalNow === null || startedCount(journalNow, stepId) !== 1) {
+    await appendEvents(state, host, [{ t: 'step.failed', at: Date.now(), id: stepId, why: 'not handed over: the journal is unreadable, over its cap or holds a second start of this step' }])
+
+    return false
+  }
+
+  await dispatchSpec(state, host, mission, task, body => host.submitPrompt(body), (m, tasks, t) => startable(m, tasks, t, cap)).run?.()
+
+  // The dispatch refuses (and says so in the mission view) when the mission moved; that is a step that never started, not a failure to learn from.
+  if ((task.dispatchedAtMs ?? 0) < nowMs - 1000) {
+    await appendEvents(state, host, [{ t: 'step.failed', at: Date.now(), id: stepId, why: REFUSED_WHY }])
+
+    return false
+  }
+
+  return true
 }
 
 /** One pass of the loop. Never rejects; a pass that is already running is skipped. */
@@ -386,71 +358,68 @@ export async function apTick(state: State, host: Host, nowMs: number = Date.now(
     const mission = activeMission(state)
 
     if (nowMs - store.spendAtMs >= SPEND_EVERY_MS && loop.phase === 'running' && loop.startedAtMs !== null) {
-      store.spend = await readSpend(state, host, loop.startedAtMs, nowMs)
+      const reading = await readSpend(state, host, loop.startedAtMs, nowMs)
+
+      store.spend = reading.spend
+      store.spendWhy = reading.why
       store.spendAtMs = nowMs
     }
 
     if (nowMs - store.preflightAtMs >= PREFLIGHT_EVERY_MS) {
-      store.preflight = await preflightAll(checks.get(state))
+      store.preflight = await preflightAll(checks.get(state), env)
       store.preflightAtMs = nowMs
     }
 
     const tunables = env === null ? null : tunablesFrom(loop.receipts, env)
-    const picked = mission === null || mission.cancelled ? null : pickTask(mission, state, skipSet(loop))
+    // How many steps may be in flight: the envelope's cap, narrowed by adaptation. The mission's own rules (dependencies, nothing past a failed task, no paused or cancelled mission) are kept by `startable`.
+    const cap = env === null || tunables === null ? 1 : Math.max(1, Math.min(env.concurrency, tunables.parallelism))
+    const effects = env === null ? {} : await effectsOf(state, host, store, checks.get(state), loop, mission, env)
+    const orphans = new Set(loop.steps.filter(step => step.status === 'started' && step.startedAt < store.bootMs).map(step => step.id))
+    let handed = 0
 
-    const facts: Facts = {
-      nowMs,
-      killSeen: store.killed,
-      envelope: env,
-      anatole: anatoleFact(state.snapshot?.anatole, nowMs),
-      spend: store.spend,
-      task: picked?.fact ?? null,
-      effects: env === null ? {} : await effectsOf(state, host, loop, mission, env),
-      orphans: new Set(loop.steps.filter(step => step.status === 'started' && step.startedAt < store.bootMs).map(step => step.id)),
-      tunables: { parallelism: tunables?.parallelism ?? 1, retries: tunables?.retries ?? 0, stepTimeoutMs: STEP_TIMEOUT_MS, tierOf: cls => (tunables === null ? 'mid' : tierOf(tunables, cls)) },
-      preflight: store.preflight,
-      slack: store.slack,
-    }
+    // One step is decided, journaled and handed over per round; the loop goes round again while there is room (up to the cap) and after a park (so a parked task does not hold the others back).
+    for (let round = 0; round < cap + MAX_PARKS_PER_PASS && handed < cap; round++) {
+      const picked = mission === null || mission.cancelled ? null : pickTask(mission, state, skipSet(store.loop), cap)
 
-    let decision = tick(loop, facts)
-
-    // Stop or pause may have been pressed while the facts were gathered (a verify command can run for minutes): the person's later word wins, and nothing starts.
-    if (decision.act !== null && (store.killed || (await killSeen(host.fs, state.cwd)) || store.loop.phase !== 'running')) decision = { events: decision.events.filter(event => event.t !== 'step.started'), act: null, status: 'stopped or paused while this pass ran: nothing started' }
-
-    store.status = decision.status
-
-    // The decision is journaled BEFORE the step is handed over: a crash between the two leaves a started step that the next pass settles by its effect, never a step that ran unrecorded.
-    const wrote = await appendEvents(state, host, decision.events)
-
-    for (const event of wrote ? decision.events : []) {
-      if (event.t === 'stop' || event.t === 'pause') say(state, host, { level: event.t === 'stop' ? 'bad' : 'warn', text: `autopilot ${event.t === 'stop' ? 'stopped' : 'paused'}: ${event.reason}`, key: `ap-${event.t}`, go: 'missions' })
-      if (event.t === 'parked') say(state, host, { level: 'info', text: `autopilot parked ${event.task}: a question is waiting`, key: `ap-park-${event.task}`, go: 'missions' })
-    }
-
-    if (wrote && decision.act !== null && mission !== null && picked !== null) {
-      // Kill flag and a second session are looked at again HERE (a verify run can take minutes): hand over only if no flag appeared and the journal, read within its cap, holds exactly one start for this step.
-      const at = pathOf(state, JOURNAL_FILE)
-      const size = await host.fs.stat(at).catch(() => undefined)
-      const journalNow = size === undefined || size.isLink === true || (size.size ?? JOURNAL_MAX_BYTES + 1) > JOURNAL_MAX_BYTES ? null : await host.fs.read(at).catch(() => null)
-
-      if ((await killSeen(host.fs, state.cwd)) || store.loop.phase === 'stopped' || store.loop.phase === 'paused') {
-        await appendEvents(state, host, [{ t: 'step.failed', at: Date.now(), id: decision.act.id, why: 'stopped before the hand-over' }])
-
-        return
+      const facts: Facts = {
+        nowMs,
+        killSeen: store.killed,
+        envelope: env,
+        anatole: anatoleFact(state.snapshot?.anatole, nowMs),
+        spend: store.spend,
+        task: picked?.fact ?? null,
+        effects,
+        orphans,
+        tunables: { parallelism: tunables?.parallelism ?? 1, retries: tunables?.retries ?? 0, stepTimeoutMs: STEP_TIMEOUT_MS, tierOf: cls => (tunables === null ? 'mid' : tierOf(tunables, cls)) },
+        preflight: store.preflight,
+        slack: store.slack,
       }
 
-      if (journalNow === null || startedCount(journalNow, decision.act.id) !== 1) {
-        await appendEvents(state, host, [{ t: 'step.failed', at: Date.now(), id: decision.act.id, why: 'not handed over: the journal is unreadable, over its cap or holds a second start of this step' }])
+      let decision = tick(store.loop, facts)
 
-        return
+      // Stop or pause may have been pressed while the facts were gathered (a verify command can run for minutes): the person's later word wins, and nothing starts.
+      if (decision.act !== null && (store.killed || (await killSeen(host.fs, state.cwd)) || store.loop.phase !== 'running')) decision = { events: decision.events.filter(event => event.t !== 'step.started'), act: null, status: 'stopped or paused while this pass ran: nothing started' }
+
+      store.status = decision.status.startsWith('waiting: spend not read') && store.spendWhy !== null ? `waiting: spend not read: ${store.spendWhy}` : decision.status
+
+      // The decision is journaled BEFORE the step is handed over: a crash between the two leaves a started step that the next pass settles by its effect, never a step that ran unrecorded.
+      const wrote = await appendEvents(state, host, decision.events)
+
+      for (const event of wrote ? decision.events : []) {
+        if (event.t === 'stop' || event.t === 'pause') say(state, host, { level: event.t === 'stop' ? 'bad' : 'warn', text: `autopilot ${event.t === 'stop' ? 'stopped' : 'paused'}: ${event.reason}`, key: `ap-${event.t}`, go: 'missions' })
+        if (event.t === 'parked') say(state, host, { level: 'info', text: `autopilot parked ${event.task}: a question is waiting`, key: `ap-park-${event.task}`, go: 'missions' })
       }
 
-      // The existing dispatch only hands out the first ready task of its own list; a shadow record with the picked task first lets autopilot work on past a parked one, over the same events and tasks.
-      const shadow: MissionRecord = { ...mission, tasks: [picked.ledger, ...mission.tasks.filter(task => task !== picked.ledger)] }
-      await dispatchSpec(state, host, shadow, picked.ledger, body => host.submitPrompt(body)).run?.()
+      if (!wrote) break
 
-      // The dispatch refuses (and says so in the mission view) when the mission moved; that is a step that never started, not a failure to learn from.
-      if (decision.act !== null && (picked.ledger.dispatchedAtMs ?? 0) < nowMs - 1000) await appendEvents(state, host, [{ t: 'step.failed', at: Date.now(), id: decision.act.id, why: REFUSED_WHY }])
+      if (decision.act === null || mission === null || picked === null) {
+        if (decision.events.some(event => event.t === 'parked')) continue
+
+        break
+      }
+
+      if (await handOver(state, host, mission, picked.ledger, decision.act.id, nowMs, cap)) handed += 1
+      else break
     }
 
     if (env !== null && tunables !== null && store.loop.phase === 'running' && nowMs - store.adaptAtMs >= ADAPT_EVERY_MS) {

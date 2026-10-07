@@ -8,12 +8,14 @@
  *   - `.claude-flow/routing-outcomes.json`     task texts the router judged (the only prompts any hook file keeps)
  *   - `.claude-flow/neural/models.json`        the store `neural_patterns delete` and `neural_compress prune` act on
  *
- * The hook never logs a prompt or the scores it surfaced, so a "past prompt" is re-scored against today's ranked file
+ * Since ADR-472 the hook also appends `.claude-flow/data/recall-log.jsonl` (a digest of the prompt, the ids/scores/ranks it surfaced,
+ * the router's pick). When a record exists it is shown as recorded. Older projects have no log, so a "past prompt" is re-scored against today's ranked file
  * with the hook's own formula (copied from .claude/helpers/intelligence.cjs getContext: tokenize, trigrams, jaccard,
  * 0.6 * match + 0.4 * pageRank, threshold 0.05, top 5) and is labelled a recomputation. `.claude-flow/neural/patterns.json`
  * (the ReasoningBank) is usually over READ_MAX and is not read; `reads.bank` says so.
  */
 import { looksSecret } from './automate'
+import { sha256 } from './ap-envelope'
 import { jsonObject, msOf, numberOf, plain, recordOf } from './parse'
 import { PROJECT, READ_MAX, readBounded, under, type ReaderFs, type ReadCache } from './files'
 
@@ -21,6 +23,12 @@ export const RANKED = '.claude-flow/data/ranked-context.json'
 export const SESSIONS = '.claude-flow/sessions'
 export const MODELS = '.claude-flow/neural/models.json'
 export const BANK = '.claude-flow/neural/patterns.json'
+/** ADR-472: what the intelligence hook logs per surfaced recall (ids, scores, ranks; a digest of the prompt, never its text). */
+export const RECALL_LOG = '.claude-flow/data/recall-log.jsonl'
+/** Records kept from the log, newest first: the log itself is capped at 1000 by the hook. */
+export const LOG_KEPT = 1000
+/** Recorded recalls the Learning Lab lists. */
+export const LOGGED_SHOWN = 6
 
 /** The hook's constants (intelligence.cjs getContext). */
 export const ALPHA = 0.6
@@ -146,7 +154,7 @@ export function parseSessionRecall(file: string, text: string | null): SessionRe
   return { file: plain(file, 60), startedAtMs: msOf(value.startedAt) ?? null, updatedAtMs: msOf(value.updatedAt) ?? null, ids: ids.filter((id): id is string => typeof id === 'string').slice(0, 20).map(id => plain(id, 80)) }
 }
 
-export type PastPrompt = { task: string; agent: string; ok: boolean; atMs: number }
+export type PastPrompt = { task: string; agent: string; ok: boolean; atMs: number; /** The hook's digest of this text (sha256 prefix, 16 hex): a recorded recall whose digest matches names this task. */ digest: string }
 
 /** The distinct task texts the router judged, newest first: the only prompts a hook file keeps. */
 export function parsePrompts(text: string | null): PastPrompt[] {
@@ -158,7 +166,7 @@ export function parsePrompts(text: string | null): PastPrompt[] {
     const row = recordOf(raw)
     const atMs = msOf(row?.timestamp)
 
-    return row === null || atMs === undefined || typeof row.task !== 'string' || row.task.trim() === '' ? [] : [{ task: shown(row.task, 160), agent: plain(typeof row.agent === 'string' ? row.agent : '?', 30), ok: row.success === true, atMs }]
+    return row === null || atMs === undefined || typeof row.task !== 'string' || row.task.trim() === '' ? [] : [{ task: shown(row.task, 160), agent: plain(typeof row.agent === 'string' ? row.agent : '?', 30), ok: row.success === true, atMs, digest: digestOf(row.task) }]
   })
   const seen = new Set<string>()
   const out: PastPrompt[] = []
@@ -173,6 +181,78 @@ export function parsePrompts(text: string | null): PastPrompt[] {
 
   return out
 }
+
+/** The hook's digest of a prompt: first 16 hex characters of sha256 of the trimmed text (intelligence.cjs promptDigest). */
+export const digestOf = (prompt: string): string => sha256(prompt.trim()).slice(0, 16)
+
+export type LoggedItem = { id: string; score: number; rank: number; category: string }
+/** One recall the hook recorded. No prompt text exists in the log; `digest` is the only handle on it. */
+export type LoggedRecall = { atMs: number; sessionId: string | null; digest: string; surfaced: LoggedItem[]; router: { agent: string; confidence: number | null } | null }
+
+/** The records of a recall-log.jsonl, newest first; lines that are not a valid record are skipped, never guessed at. */
+export function parseRecallLog(text: string | null): LoggedRecall[] {
+  if (text === null) return []
+
+  const out: LoggedRecall[] = []
+
+  for (const line of text.split('\n')) {
+    if (line === '' || line.length > 20_000) continue
+
+    let value: unknown
+
+    try {
+      value = JSON.parse(line)
+    } catch {
+      continue
+    }
+
+    const row = recordOf(value)
+    const atMs = numberOf(row?.at)
+    const digest = typeof row?.digest === 'string' && /^[0-9a-f]{8,64}$/.test(row.digest) ? row.digest : null
+
+    if (row === null || atMs === undefined || atMs <= 0 || digest === null || !Array.isArray(row.surfaced)) continue
+
+    const surfaced = row.surfaced.slice(0, 10).flatMap((raw): LoggedItem[] => {
+      const item = recordOf(raw)
+      const score = numberOf(item?.score)
+      const rank = numberOf(item?.rank)
+
+      return item === null || typeof item.id !== 'string' || item.id === '' || score === undefined || rank === undefined ? [] : [{ id: plain(item.id, 80), score, rank, category: plain(typeof item.cat === 'string' ? item.cat : '', 40) }]
+    })
+
+    if (surfaced.length === 0) continue
+
+    const router = recordOf(row.router)
+
+    out.push({ atMs, sessionId: typeof row.sid === 'string' ? plain(row.sid, 64) : null, digest, surfaced, router: router === null ? null : { agent: plain(typeof router.agent === 'string' ? router.agent : '?', 30), confidence: numberOf(router.confidence) ?? null } })
+  }
+
+  return out.sort((a, b) => b.atMs - a.atMs).slice(0, LOG_KEPT)
+}
+
+export type SurfacedCount = { id: string; category: string; count: number; lastAtMs: number }
+
+/** How often each id was surfaced, and when last, over the recorded recalls: the real count a pattern's lifecycle row can show. */
+export function surfacedCounts(log: readonly LoggedRecall[]): Map<string, SurfacedCount> {
+  const out = new Map<string, SurfacedCount>()
+
+  for (const recall of log) {
+    for (const item of recall.surfaced) {
+      const known = out.get(item.id)
+
+      if (known === undefined) out.set(item.id, { id: item.id, category: item.category, count: 1, lastAtMs: recall.atMs })
+      else {
+        known.count += 1
+        known.lastAtMs = Math.max(known.lastAtMs, recall.atMs)
+      }
+    }
+  }
+
+  return out
+}
+
+/** The span the log covers, oldest record to `nowMs`: an id absent from the log proves "not surfaced" only over this span. */
+export const logWindowMs = (log: readonly LoggedRecall[], nowMs: number): number => (log.length === 0 ? 0 : Math.max(0, nowMs - (log[log.length - 1]?.atMs ?? nowMs)))
 
 /** One pattern of `.claude-flow/neural/models.json`: only what the file records (no rank, no last-used time). */
 export type NeuralPattern = { id: string; name: string; type: string; content: string; createdAtMs: number | null; usageCount: number; verdict: string | null }
@@ -200,15 +280,17 @@ export const lifecycleOrder = (rows: readonly NeuralPattern[]): NeuralPattern[] 
 /** The ids `neural_compress prune` with this threshold would remove: usageCount below it (neural-tools.ts). */
 export const wouldPrune = (rows: readonly NeuralPattern[], threshold: number): string[] => rows.filter(row => row.usageCount < threshold).map(row => row.id)
 
-export type ReadStatus = 'ok' | 'missing' | 'too-large' | 'refused'
+export type ReadStatus = 'ok' | 'missing' | 'too-large' | 'refused' | 'not-regular'
 
 export type RecallFacts = {
   ranked: Ranked | null
   sessions: SessionRecall[]
   prompts: PastPrompt[]
   neural: NeuralPattern[] | null
+  /** ADR-472: the hook's recall log, newest first; empty when the hook has not written one (an older helper, or RUFLO_RECALL_LOG=0). */
+  log: LoggedRecall[]
   /** Per source: ok, missing, or too-large (the ReasoningBank patterns.json is read only for its size). */
-  reads: { ranked: ReadStatus; sessions: ReadStatus; prompts: ReadStatus; neural: ReadStatus; bank: ReadStatus }
+  reads: { ranked: ReadStatus; sessions: ReadStatus; prompts: ReadStatus; neural: ReadStatus; bank: ReadStatus; log: ReadStatus }
 }
 
 /** The recall facts of a snapshot that carries them, else null: the view's one accessor. */
@@ -219,13 +301,15 @@ const status = (read: { text: string | null; reason?: string }): ReadStatus => (
 let lastRanked: { text: string; parsed: Ranked | null } | null = null
 let lastModels: { text: string; parsed: NeuralPattern[] | null } | null = null
 let lastOutcomes: { text: string; parsed: PastPrompt[] } | null = null
+let lastLog: { text: string; parsed: LoggedRecall[] } | null = null
 
 /** Reads the four files (and stats the bank); never rejects. `fs.read` of a file over its cap is refused by readBounded. */
 export async function readRecall(fs: ReaderFs, cache: ReadCache, cwd: string): Promise<RecallFacts> {
-  const [ranked, models, outcomes, bankStat, listed] = await Promise.all([
+  const [ranked, models, outcomes, logRead, bankStat, listed] = await Promise.all([
     readBounded(fs, cache, under(cwd, RANKED)),
     readBounded(fs, cache, under(cwd, MODELS)),
     readBounded(fs, cache, under(cwd, PROJECT.outcomes)),
+    readBounded(fs, cache, under(cwd, RECALL_LOG), READ_MAX, true),
     fs.stat(under(cwd, BANK)).catch(() => undefined),
     fs.list(under(cwd, SESSIONS)).catch(() => null),
   ])
@@ -242,12 +326,14 @@ export async function readRecall(fs: ReaderFs, cache: ReadCache, cwd: string): P
 
   if (models.text !== null && lastModels?.text !== models.text) lastModels = { text: models.text, parsed: parseNeuralStore(models.text) }
   if (outcomes.text !== null && lastOutcomes?.text !== outcomes.text) lastOutcomes = { text: outcomes.text, parsed: parsePrompts(outcomes.text) }
+  if (logRead.text !== null && lastLog?.text !== logRead.text) lastLog = { text: logRead.text, parsed: parseRecallLog(logRead.text) }
 
   return {
     ranked: ranked.text === null ? null : (lastRanked?.parsed ?? null),
     sessions,
     prompts: outcomes.text === null ? [] : (lastOutcomes?.parsed ?? []),
     neural: models.text === null ? null : (lastModels?.parsed ?? null),
-    reads: { ranked: status(ranked), sessions: listed === null ? 'missing' : 'ok', prompts: status(outcomes), neural: status(models), bank: bankStat === undefined ? 'missing' : (bankStat.size ?? 0) > READ_MAX ? 'too-large' : 'ok' },
+    log: logRead.text === null ? [] : (lastLog?.parsed ?? []),
+    reads: { ranked: status(ranked), sessions: listed === null ? 'missing' : 'ok', prompts: status(outcomes), neural: status(models), bank: bankStat === undefined ? 'missing' : (bankStat.size ?? 0) > READ_MAX ? 'too-large' : 'ok', log: status(logRead) },
   }
 }

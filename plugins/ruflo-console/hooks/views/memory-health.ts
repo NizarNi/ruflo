@@ -1,6 +1,8 @@
 import type { RenderElement } from 'claude-code'
 
-import { analyseHealth, HEALTH_CAP, type HealthReport, type HealthSample, NEAR_JACCARD, PAIR_CAP, STALE_DAYS } from '../data/memory-health'
+import type { MapEntry } from '../gfx/memmap'
+import { analyseHealth, HEALTH_CAP, type HealthReport, type HealthSample, NEAR_JACCARD, PAIR_CAP, recallEvidenceOf, type SemanticReport, semanticDuplicates, SIMILAR_COSINE, STALE_DAYS } from '../data/memory-health'
+import { recallOf, type RecallFacts } from '../data/recall'
 import { gauge } from '../memory-lines'
 import { ago, button, clip, confirmHere, count, kv, live, row, sourceLine, text, THEME, type Ctx } from './common'
 
@@ -26,9 +28,28 @@ function summaryRows(ctx: Ctx, report: HealthReport, total: number | undefined):
   return [
     text(ctx, ` ${limitsLine(report, total)}`, report.isTruncated ? { color: THEME.warn } : { dimColor: true }),
     kv(ctx, 'duplicates', `${gauge(report.duplicateEntries, report.analysed, width)} ${report.duplicateEntries} entries in ${report.clusterCount} cluster${report.clusterCount === 1 ? '' : 's'} (${share(report.duplicateEntries, report.analysed)})`, report.clusterCount === 0 ? THEME.ok : THEME.warn),
-    kv(ctx, 'stale', `${gauge(report.staleCount, report.analysed, width)} ${report.staleCount} never recalled and not updated for ${STALE_DAYS}d (${share(report.staleCount, report.analysed)})`, report.staleCount === 0 ? THEME.ok : THEME.warn),
-    kv(ctx, 'never recalled', `${report.neverRecalledEntries} of ${report.analysed} entries have an access count of 0 · ${report.neverRecalledNamespaces.length} whole namespace${report.neverRecalledNamespaces.length === 1 ? '' : 's'}`),
+    kv(ctx, 'stale', `${gauge(report.staleCount, report.analysed, width)} ${report.staleCount} ${staleMeaning(report)} (${share(report.staleCount, report.analysed)})`, report.staleCount === 0 ? THEME.ok : THEME.warn),
+    text(ctx, ` ${staleRule(report)}`, { dimColor: true }),
+    kv(ctx, 'never retrieved', `${report.neverRecalledEntries} of ${report.analysed} entries have an access count of 0 (retrievals by memory retrieve or search, not the hook) · ${report.neverRecalledNamespaces.length} whole namespace${report.neverRecalledNamespaces.length === 1 ? '' : 's'}`),
   ]
+}
+
+/** What "stale" counts, said by the rules that actually fired. */
+function staleMeaning(report: HealthReport): string {
+  if (report.log === null) return `never retrieved and not updated for ${STALE_DAYS}d`
+
+  return `not surfaced by the hook (log) or never retrieved (access count), and not updated for ${STALE_DAYS}d`
+}
+
+/** Which rule judged how many entries, and why the log is or is not used. Never omitted. */
+export function staleRule(report: HealthReport): string {
+  if (report.log === null) return 'rule: access count only (no recall log read: it needs the hook’s recall-log.jsonl and the ranked file). The count has no time, so this is “never retrieved”, not “not retrieved lately”.'
+
+  const span = report.log.days < 1 ? 'under a day' : `${report.log.days.toFixed(1)} days`
+
+  if (report.logChecked === 0) return `rule: access count (the recall log covers ${span} of ${report.log.records} recalls but is not used: ${report.log.days < STALE_DAYS ? `it is shorter than ${STALE_DAYS}d` : 'no entry key matches a name the hook recalls'})`
+
+  return `rule: log for ${report.logChecked} entr${report.logChecked === 1 ? 'y' : 'ies'} whose key the hook can recall (not surfaced in ${STALE_DAYS}d of a ${span} log; ${report.staleByLog} stale), access count for the rest (${report.staleByCount} stale)`
 }
 
 function clusterRows(ctx: Ctx, report: HealthReport): RenderElement[] {
@@ -49,10 +70,10 @@ function clusterRows(ctx: Ctx, report: HealthReport): RenderElement[] {
 }
 
 function staleRows(ctx: Ctx, report: HealthReport): RenderElement[] {
-  const rows = report.stale.slice(0, SHOW_STALE).map(entry => text(ctx, ` ${clip(`${entry.namespace}/${entry.key}`, Math.max(10, ctx.columns - 24))}  updated ${ago(entry.updatedAtMs, ctx.nowMs)}`, { color: THEME.warn }))
+  const rows = report.stale.slice(0, SHOW_STALE).map(entry => text(ctx, ` ${clip(`${entry.namespace}/${entry.key}`, Math.max(10, ctx.columns - 38))}  updated ${ago(entry.updatedAtMs, ctx.nowMs)} · by ${entry.by === 'log' ? 'recall log' : 'access count'}`, { color: THEME.warn }))
 
   if (report.staleCount > SHOW_STALE) rows.push(text(ctx, `   +${report.staleCount - SHOW_STALE} more, oldest shown first`, { dimColor: true }))
-  if (rows.length === 0) rows.push(text(ctx, ` no entry is both unrecalled and ${STALE_DAYS}+ days untouched`, { color: THEME.ok }))
+  if (rows.length === 0) rows.push(text(ctx, ` no entry is both unrecalled (by the rule above) and ${STALE_DAYS}+ days untouched`, { color: THEME.ok }))
 
   return rows
 }
@@ -95,19 +116,48 @@ function consolidateRows(ctx: Ctx): RenderElement[] {
  * The analysis is O(pairs) (up to PAIR_CAP, ~100 ms at the cap) and the view renders every frame, so it is computed once per
  * probe result and per minute (the stale cutoff is the only thing the clock changes), never per frame.
  */
-const reports = new WeakMap<HealthSample, { minute: number; report: HealthReport }>()
+const reports = new WeakMap<HealthSample, { minute: number; facts: RecallFacts | null; report: HealthReport }>()
 
-export function reportFor(sample: HealthSample, nowMs: number): HealthReport {
+export function reportFor(sample: HealthSample, nowMs: number, facts: RecallFacts | null = null): HealthReport {
   const minute = Math.floor(nowMs / 60_000)
   const cached = reports.get(sample)
 
-  if (cached !== undefined && cached.minute === minute) return cached.report
+  if (cached !== undefined && cached.minute === minute && cached.facts === facts) return cached.report
 
-  const report = analyseHealth(sample, nowMs)
+  const report = analyseHealth(sample, nowMs, { evidence: recallEvidenceOf(facts, nowMs) })
 
-  reports.set(sample, { minute, report })
+  reports.set(sample, { minute, facts, report })
 
   return report
+}
+
+const semantics = new WeakMap<readonly MapEntry[], SemanticReport | null>()
+
+/** Similar-by-meaning clusters of the map's listed entries, computed once per probe result (about 50 ms at 500 x 384, never per frame). */
+export function semanticFor(entries: readonly MapEntry[]): SemanticReport | null {
+  if (!semantics.has(entries)) semantics.set(entries, semanticDuplicates(entries))
+
+  return semantics.get(entries) ?? null
+}
+
+function semanticRows(ctx: Ctx, entries: readonly MapEntry[] | null): RenderElement[] {
+  const report = entries === null ? null : semanticFor(entries)
+
+  if (report === null) return [text(ctx, ' similar by meaning: not checked. It needs stored vectors, which memory list prints only with --embeddings (a CLI that has it, and entries stored with embeddings)', { dimColor: true })]
+
+  const rows: RenderElement[] = [text(ctx, ` ${report.compared} of ${report.listed} listed entries with a stored vector compared${report.withVector > report.compared ? ` (the newest ${report.cap} of ${report.withVector}; the rest are not)` : ''} · ${count(report.pairs)} pairs · cosine ≥ ${SIMILAR_COSINE}`, { dimColor: true })]
+
+  if (report.clusterCount === 0) return [...rows, text(ctx, ' no two stored vectors are that close', { color: THEME.ok })]
+
+  for (const cluster of report.clusters.slice(0, SHOW_CLUSTERS)) {
+    const names = cluster.members.slice(0, 3).map(member => `${member.namespace}/${member.key}`).join(' · ')
+
+    rows.push(row(ctx, [ctx.kit.Text({ bold: true, color: THEME.warn, children: ` like ×${cluster.size} ` }), text(ctx, clip(`${names}${cluster.size > 3 ? ` +${cluster.size - 3}` : ''} (min cos ${cluster.minCosine.toFixed(3)})`, Math.max(10, ctx.columns - 14)), { color: THEME.info })]))
+  }
+
+  if (report.clusterCount > SHOW_CLUSTERS) rows.push(text(ctx, `   +${report.clusterCount - SHOW_CLUSTERS} more cluster${report.clusterCount - SHOW_CLUSTERS === 1 ? '' : 's'} not drawn (${report.entries} entries in ${report.clusterCount} clusters in all)`, { dimColor: true }))
+
+  return rows
 }
 
 /** The health section's rows, or one honest line when the probe has not answered. */
@@ -119,13 +169,17 @@ export function healthRows(ctx: Ctx, now: () => number = () => ctx.nowMs): Rende
 
   if (sample.entries.length === 0) return [text(ctx, ' no entries to analyse: store one, or import your Claude memories (IMPORT CLAUDE)', { dimColor: true })]
 
-  const report = reportFor(sample, now())
+  const facts = recallOf(ctx.state.snapshot)
+  const report = reportFor(sample, now(), facts)
+  const mapped = live<MapEntry[]>(ctx.state.probes.get('memmap'))
   const total = live<{ total?: number }>(ctx.state.probes.get('memory'))?.total
 
   return [
     ...summaryRows(ctx, report, total),
     text(ctx, ' duplicate clusters', { bold: true, color: THEME.head }),
     ...clusterRows(ctx, report),
+    text(ctx, ' similar by meaning (stored vectors)', { bold: true, color: THEME.head }),
+    ...semanticRows(ctx, mapped),
     text(ctx, ' stale entries', { bold: true, color: THEME.head }),
     ...staleRows(ctx, report),
     text(ctx, ' recall by namespace', { bold: true, color: THEME.head }),

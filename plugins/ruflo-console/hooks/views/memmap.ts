@@ -2,7 +2,7 @@ import type { RenderElement } from 'claude-code'
 
 import type { Namespaces } from '../data/cli'
 import { hitsOf, isHit } from '../data/memmap'
-import { layout, MAP_ROWS, memmapPicture, SPACE_COLORS, spacesOf, type MapEntry, type MapPoint } from '../gfx/memmap'
+import { drawable, layout, MAP_ROWS, memmapPicture, SPACE_COLORS, spacesOf, type MapEntry, type MapPoint } from '../gfx/memmap'
 import type { Grid } from '../gfx/raster'
 import type { State } from '../state'
 import { clip, count, live, row, rule, text, type Ctx } from './common'
@@ -35,11 +35,12 @@ function litOf(state: State, points: readonly MapPoint[]): { lit: Set<string>; n
 
 /** The map for one frame, by Raster key; none while there is nothing to draw (the view then says so). */
 export function memmapPictures(state: State, columns: number): Map<string, Grid> {
-  const { entries } = mapEntriesFrom(state)
+  const listed = mapEntriesFrom(state).entries
   const pictures = new Map<string, Grid>()
 
-  if (entries.length === 0) return pictures
+  if (listed.length === 0) return pictures
 
+  const { entries } = drawable(listed)
   const { points } = layout(entries)
 
   pictures.set('memmap', memmapPicture(points, spacesOf(entries), litOf(state, points).lit, Math.max(20, Math.min(columns, 100)), MAP_ROWS))
@@ -57,19 +58,20 @@ function mapPicture(ctx: Ctx, entries: number, spaces: number): RenderElement {
 /** The memory map section: the picture, what its places mean (said plainly), the namespace colours and what the last search lit. */
 export function memmapRows(ctx: Ctx): RenderElement[] {
   const { state, nowMs } = ctx
-  const { entries, hasCounts } = mapEntriesFrom(state)
+  const { entries: listed, hasCounts } = mapEntriesFrom(state)
 
-  if (entries.length === 0) {
+  if (listed.length === 0) {
     return [rule(ctx, 'Memory map'), text(ctx, sourceFallback(state, nowMs), { dimColor: true })]
   }
 
+  const { entries, omitted } = drawable(listed)
   const { mode, points } = layout(entries)
   const spaces = spacesOf(entries)
   const { lit, named } = litOf(state, points)
   const result = state.lab.result
   const searched = result !== null && (result.id === 'mem-search' || result.id === 'mem-unified')
   const rows: RenderElement[] = [
-    rule(ctx, 'Memory map', `${entries.length} entries · ${spaces.length} namespace${spaces.length === 1 ? '' : 's'} · ${mode === 'embedding' ? 'embedding layout' : 'hash layout'}`),
+    rule(ctx, 'Memory map', `${entries.length} entries · ${spaces.length} namespace${spaces.length === 1 ? '' : 's'} · ${mode === 'embedding' ? 'embedding layout' : 'hash layout'}${omitted > 0 ? ` · ${omitted} without a vector not drawn` : ''}`),
     mapPicture(ctx, entries.length, spaces.length),
   ]
 
@@ -107,8 +109,8 @@ export function memmapRows(ctx: Ctx): RenderElement[] {
     note(
       ctx,
       mode === 'embedding'
-        ? 'layout: each entry’s stored embedding projected to 2D by a fixed random projection; near means similar, but a 2D projection loses most of the distance'
-        : 'layout: NOT similarity. `memory list` does not print vectors, so each namespace has a fixed place and each entry a hash of its key scatters it inside; near means the same namespace only',
+        ? `layout: each entry’s stored embedding projected to 2D by a fixed random projection (read from the store, not recomputed); near means similar, but a 2D projection loses most of the distance${omitted > 0 ? `; ${omitted} listed entr${omitted === 1 ? 'y has' : 'ies have'} no stored vector and ${omitted === 1 ? 'is' : 'are'} left off the map` : ''}`
+        : 'layout: NOT similarity. No stored vectors were read for most entries (an older CLI does not print them, or most entries have none), so each namespace has a fixed place and each entry a hash of its key scatters it inside; near means the same namespace only',
     ),
   )
 

@@ -148,7 +148,7 @@ export function targetsOf(input: TargetInput): Target[] {
   for (const agent of input.agents.slice(0, 20)) {
     const id = mention(agent.name)
 
-    if (id !== '' && !out.some(held => held.id === id)) out.push({ id, label: `agent ${agent.name}`, transport: 'send-message', leaves: 'machine', leavesText: 'nothing: queued inside this session', cost: 'session-turn', costText: 'the agent\'s own next turn', arrival: 'none', arrivalText: 'queued for its next tool round; its answer is not routed back here', ref: agent.id })
+    if (id !== '' && !out.some(held => held.id === id)) out.push({ id, label: `agent ${agent.name}`, transport: 'send-message', leaves: 'machine', leavesText: 'nothing: queued inside this session', cost: 'session-turn', costText: 'the agent\'s own next turn', arrival: 'none', arrivalText: 'in its inbox at once, read when its current turn ends (minutes into a long turn); its answer is not routed back here', ref: agent.id })
   }
 
   if (input.hasHive) out.push({ id: 'hive', label: 'ruflo hive-mind', transport: 'hive', leaves: 'machine', leavesText: 'nothing: written to the hive\'s shared memory', cost: 'free', costText: 'no model call', arrival: 'none', arrivalText: 'appended to the hive memory; a worker sees it only if its own turn reads it (a proposal needs votes)', ref: 'hive' })

@@ -74,6 +74,26 @@ export function projectVector(vector: readonly number[]): { x: number; y: number
 /** Every entry is embedded and carries its vector: the only case the map may call 'embedding'. */
 export const modeOf = (entries: readonly MapEntry[]): MapMode => (entries.length > 0 && entries.every(entry => entry.vector !== undefined && entry.vector.length > 1) ? 'embedding' : 'hash')
 
+const subsets = new WeakMap<readonly MapEntry[], { entries: readonly MapEntry[]; omitted: number }>()
+
+/**
+ * What is drawn. A store usually has some entries with no vector (an entry stored with embeddings off). If at least half have one, the
+ * map draws only those, in the embedding layout, and says how many it left out; below half it keeps every entry in the hash layout. One
+ * answer per entries array, so the picture and the rows of a frame agree and the layout cache still hits.
+ */
+export function drawable(entries: readonly MapEntry[]): { entries: readonly MapEntry[]; omitted: number } {
+  const known = subsets.get(entries)
+
+  if (known !== undefined) return known
+
+  const withVector = entries.filter(entry => entry.vector !== undefined && entry.vector.length > 1)
+  const answer = withVector.length > 0 && withVector.length < entries.length && withVector.length * 2 >= entries.length ? { entries: withVector, omitted: entries.length - withVector.length } : { entries, omitted: 0 }
+
+  subsets.set(entries, answer)
+
+  return answer
+}
+
 const laidOut = new WeakMap<readonly MapEntry[], { mode: MapMode; points: MapPoint[] }>()
 
 /**

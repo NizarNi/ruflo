@@ -4,6 +4,7 @@
  * characters escaped, so a label cannot break a row and a token in a result cannot reach the summary. A figure nobody
  * recorded reads n/a: the console holds no per-run cost, so cost is shown only when the caller hands one over with its source.
  */
+import { isoOf } from './safe'
 import type { ActionSpec } from '../actions'
 import { newFileArgv } from './wf-file'
 import { cleanText } from './wf-clean'
@@ -19,7 +20,7 @@ const cell = (value: string | undefined, max = 80): string => (value === undefin
 const line = (value: string): string => cleanText(value).replace(/\s+/g, ' ')
 /** UTF-8 size of a text, from the platform's own encoder. */
 const BYTES = (text: string): number => new TextEncoder().encode(text).length
-const when = (ms: number | undefined): string => (ms === undefined || !Number.isFinite(ms) ? 'n/a' : new Date(ms).toISOString())
+const when = (ms: number | undefined): string => isoOf(ms)
 
 function agentRows(agents: readonly WfAgent[]): string[] {
   return [

@@ -308,6 +308,31 @@ export function widened(prev: Envelope, next: Envelope): string[] {
   return out
 }
 
+/** Dimensions in which `next` grants LESS than `prev` (the diff the confirm card and the editor show beside `widened`). */
+export function narrowed(prev: Envelope, next: Envelope): string[] {
+  const out: string[] = []
+  const shrank = (label: string, before: readonly string[], after: readonly string[]): void => {
+    const removed = before.filter(item => !after.includes(item))
+
+    if (removed.length > 0) out.push(`${label}: removes ${removed.slice(0, 4).join(', ')}${removed.length > 4 ? '…' : ''}`)
+  }
+
+  shrank('tool classes', prev.toolClasses, next.toolClasses)
+  shrank('paths', prev.paths, next.paths)
+  shrank('repos', prev.repos, next.repos)
+  shrank('network', prev.network, next.network)
+  shrank('secret env', prev.secretEnv, next.secretEnv)
+  shrank('verify commands', prev.verify.map(argv => argv.join(' ')), next.verify.map(argv => argv.join(' ')))
+
+  for (const key of ['hourUsd', 'dayUsd', 'totalUsd'] as const) if (next.spend[key] < prev.spend[key]) out.push(`${key}: ${prev.spend[key]} to ${next.spend[key]}`)
+
+  if (next.concurrency < prev.concurrency) out.push(`concurrency: ${prev.concurrency} to ${next.concurrency}`)
+  if (next.maxDurationMs < prev.maxDurationMs) out.push('duration: shorter')
+  if (!next.acceptWithoutAnatole && prev.acceptWithoutAnatole) out.push('no longer runs without Project Anatole')
+
+  return out
+}
+
 /** A path is inside the envelope when it is one of its folders or below one (compared at a folder boundary, so /a/bc is not inside /a/b). */
 export const pathAllowed = (envelope: Envelope, path: string): boolean => !path.split('/').includes('..') && !isProtectedPath(path) && envelope.paths.some(root => path === root || path.startsWith(`${root}/`))
 

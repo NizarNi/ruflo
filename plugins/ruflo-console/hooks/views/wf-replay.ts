@@ -9,10 +9,11 @@
  */
 import type { RenderElement } from 'claude-code'
 
-import { boardAt, buildTimeline, describeStep, isPlaying, newReplay, offsetOf, SPEEDS, stepNow, stepReplay, type ReplayCommand, type ReplayUi, type Timeline } from '../data/wf-replay'
+import { boardAt, buildTimeline, describeStep, isPlaying, newReplay, offsetOf, settle, SPEEDS, stepNow, stepReplay, type ReplayCommand, type ReplayUi, type Timeline } from '../data/wf-replay'
 import { fmtElapsed, fmtTokens, type WfAgent, type WfRun } from '../data/workflows'
 import { button, clip, row, text, THEME, type Ctx } from './common'
 import { fold, redraw } from './wf-fold'
+import { flow, safe } from './wf-layout'
 import { registerSlot, type SlotEnv } from './wf-slots'
 import './wf-compare'
 import './wf-export'
@@ -50,6 +51,28 @@ export function applyReplay(run: WfRun, command: ReplayCommand, nowMs: number): 
 
   return next
 }
+
+/** How often a playing replay advances and redraws, on the console's clock. */
+export const TICK_MS = 400
+
+/**
+ * One tick of a playing replay: brings it up to `nowMs` (bounded: data/wf-replay.ts `settle`) and says whether it is still playing. False for a
+ * paused, finished or unknown replay, which ends its timer.
+ */
+export function replayTick(run: WfRun, nowMs: number): boolean {
+  const ui = replays.get(run.id)
+
+  if (ui === undefined || ui.playFromMs === null) return false
+
+  const next = settle(ui, timelineOf(run), nowMs)
+
+  replays.set(run.id, next)
+
+  return next.playFromMs !== null
+}
+
+/** Starts the replay's clock for a run while it plays (one timer per run; asking again is harmless). Needs the page's `tick` action, which a surface without a clock lacks: then it advances on each redraw as it always did. */
+const startTick = (ctx: Ctx, run: WfRun): void => ctx.act.workflows.tick?.(`replay-${run.id}`, TICK_MS, () => replayTick(run, Date.now()))
 
 /** For tests. */
 export const resetReplays = (): void => (replays.clear(), timelines.clear())
@@ -108,17 +131,30 @@ export function replayBody(env: SlotEnv, run: WfRun): RenderElement[] {
   const playing = isPlaying(ui, tl, nowMs)
   const board = boardAt(run, tl, step)
   const go = (command: ReplayCommand) => () => {
-    applyReplay(run, command, Date.now())
+    const next = applyReplay(run, command, Date.now())
+
+    if (next.playFromMs !== null) startTick(ctx, run)
     redraw(ctx)
   }
+
+  // A replay that is playing when the page is drawn (the person left it and came back) gets its clock again.
+  if (playing) startTick(ctx, run)
   const span = tl.t1 - tl.t0
 
   return [
     text(ctx, ` step ${step}/${n} · ${clock(offsetOf(tl, step))} of ${clock(span)} · ${ui.speed}x · ${playing ? '▶ playing' : step >= n ? '■ at the end' : '⏸ paused'}`),
     text(ctx, ` ${bar(span === 0 ? (step >= n ? 1 : 0) : offsetOf(tl, step) / span, Math.max(10, Math.min(48, ctx.columns - 6)))}`, { dimColor: true }),
     text(ctx, ` ▸ ${clip(describeStep(tl, step), Math.max(10, ctx.columns - 6))}`, { color: THEME.info }),
-    row(ctx, [button(ctx, 'wf-rp-first', '⏮', go('first')), button(ctx, 'wf-rp-pphase', '◂◂ phase', go('prev-phase')), button(ctx, 'wf-rp-prev', '◂ step', go('prev')), button(ctx, 'wf-rp-play', playing ? '⏸ pause' : '▶ play', go('play'), { primary: true }), button(ctx, 'wf-rp-next', 'step ▸', go('next')), button(ctx, 'wf-rp-nphase', 'phase ▸▸', go('next-phase')), button(ctx, 'wf-rp-last', '⏭', go('last'))], 'wf-rp-controls'),
-    row(ctx, [text(ctx, ' speed '), button(ctx, 'wf-rp-slower', '−', go('slower')), text(ctx, ` ${ui.speed}x `), button(ctx, 'wf-rp-faster', '+', go('faster')), text(ctx, ` of ${SPEEDS.join(' · ')}`, { dimColor: true })], 'wf-rp-speed'),
+    ...flow(ctx, [
+      { key: 'wf-rp-first', label: '⏮', onPress: go('first') },
+      { key: 'wf-rp-pphase', label: '◂◂ phase', onPress: go('prev-phase') },
+      { key: 'wf-rp-prev', label: '◂ step', onPress: go('prev') },
+      { key: 'wf-rp-play', label: playing ? '⏸ pause' : '▶ play', onPress: go('play'), primary: true },
+      { key: 'wf-rp-next', label: 'step ▸', onPress: go('next') },
+      { key: 'wf-rp-nphase', label: 'phase ▸▸', onPress: go('next-phase') },
+      { key: 'wf-rp-last', label: '⏭', onPress: go('last') },
+    ], 'wf-rp-controls'),
+    row(ctx, [text(ctx, ' speed '), button(ctx, 'wf-rp-slower', '−', safe(go('slower'))), text(ctx, ` ${ui.speed}x `), button(ctx, 'wf-rp-faster', '+', safe(go('faster'))), ...(ctx.columns >= 64 ? [text(ctx, ` of ${SPEEDS.join(' · ')}`, { dimColor: true })] : [])], 'wf-rp-speed'),
     ...boardRows(ctx, board),
     ...(tl.untimed.length > 0 ? [text(ctx, ` ${tl.untimed.length} agent${tl.untimed.length === 1 ? '' : 's'} left off: no start time (or no span) in the run's files, so there is no moment to place ${tl.untimed.length === 1 ? 'it' : 'them'} at`, { color: THEME.warn })] : []),
     text(ctx, step >= n ? ' This is the run\'s real final board.' : ' Tokens show n/a until an agent ends: only its final figure is recorded. A running agent\'s time is measured to this step.', { dimColor: true }),

@@ -5,9 +5,10 @@
 import type { RenderElement } from 'claude-code'
 
 import { compareRuns, fmtRatio, otherRunsOf, TIME_DELTA, TOKEN_DELTA, type AgentDiff, type Comparison, type Mark } from '../data/wf-compare'
-import { fmtElapsed, fmtTokens, shortId, type WfAgent, type WfRun } from '../data/workflows'
-import { button, clip, row, text, THEME, type Ctx } from './common'
+import { fmtElapsed, fmtTokens, type WfAgent, type WfRun } from '../data/workflows'
+import { clip, row, text, THEME, type Ctx } from './common'
 import { fold, redraw } from './wf-fold'
+import { flow, runTag } from './wf-layout'
 import { registerSlot, type SlotEnv } from './wf-slots'
 
 const against = new Map<string, string>()
@@ -78,8 +79,8 @@ export function compareBody(env: SlotEnv, run: WfRun): RenderElement[] {
   }
 
   return [
-    row(ctx, [text(ctx, ` A ${shortId(run.id)}`, { bold: true }), text(ctx, '  vs  '), text(ctx, `B ${shortId(other.id)}`, { bold: true }), text(ctx, total > 1 ? `  (${total} other runs of this workflow)` : '', { dimColor: true })], 'wf-cmp-ids'),
-    row(ctx, [...(total > 1 ? [button(ctx, 'wf-cmp-prev', '◂ other run', () => (stepPartner(run, runs, -1), redraw(ctx))), button(ctx, 'wf-cmp-next', 'other run ▸', () => (stepPartner(run, runs, 1), redraw(ctx)))] : []), button(ctx, 'wf-cmp-only', isOnly ? 'show all agents' : 'changed only', flip)], 'wf-cmp-controls'),
+    row(ctx, [text(ctx, ` A ${runTag(run.id)}`, { bold: true }), text(ctx, '  vs  '), text(ctx, `B ${runTag(other.id)}`, { bold: true }), text(ctx, total > 1 ? `  (${total} other runs of this workflow)` : '', { dimColor: true })], 'wf-cmp-ids'),
+    ...flow(ctx, [...(total > 1 ? [{ key: 'wf-cmp-prev', label: '◂ other run', onPress: () => (stepPartner(run, runs, -1), redraw(ctx)) }, { key: 'wf-cmp-next', label: 'other run ▸', onPress: () => (stepPartner(run, runs, 1), redraw(ctx)) }] : []), { key: 'wf-cmp-only', label: isOnly ? 'show all agents' : 'changed only', onPress: flip }], 'wf-cmp-controls'),
     ...totalsRows(ctx, result),
     text(ctx, ` ${result.counts.same} same · ${result.counts.changed} changed · ${result.counts.added} only in B (+) · ${result.counts.removed} only in A (-)   ~ = tokens off by ${TOKEN_DELTA * 100}% or time by ${TIME_DELTA * 100}% or a state/model change`, { dimColor: true }),
     ...shown.slice(0, ROWS_MAX).map(entry => diffRow(ctx, entry)),

@@ -3,9 +3,12 @@
  * Memory map cost: the data reader (`memory list` JSON -> entries), the layout, the picture and the whole section render, at 1k and
  * 10k entries (the real probe caps at MAP_LIMIT = 500; the larger sizes show what an uncapped caller would pay). Median and p99
  * wall time per call, approximate bytes allocated per call (heapUsed delta after gc(); run with --expose-gc, else n/a).
- * Embedding rows are synthetic 384-dim vectors: the CLI's list does not print vectors today, so that column is the worst case.
+ * Embedding rows are synthetic 384-dim vectors, printed the way `memory list --embeddings` prints them (int8 + scale, base64; ADR-472),
+ * so the parse row includes the decode. 500 is the real probe's size (MAP_LIMIT); the larger sizes show what an uncapped caller would pay.
  *   NODE_OPTIONS=--expose-gc npx -y tsx plugins/ruflo-console/scripts/bench-memmap.mjs [iterations]
  */
+import { encodeEmbeddingQ8 } from '../../../v3/@claude-flow/cli/src/memory/embedding-q8.ts'
+import { semanticDuplicates } from '../hooks/data/memory-health.ts'
 import { mapEntriesOf } from '../hooks/data/memmap.ts'
 import { layout, memmapPicture, spacesOf } from '../hooks/gfx/memmap.ts'
 import { newState } from '../hooks/state.ts'
@@ -57,13 +60,13 @@ const time = (/** @type {() => unknown} */ fn) => {
 
 const row = (/** @type {string} */ name, /** @type {() => unknown} */ fn) => console.log(`  ${name.padEnd(34)} ${time(fn)}`)
 
-for (const size of [1000, 10_000]) {
+for (const size of [500, 1000, 10_000]) {
   console.log(`\n${size} entries (${N} runs each)`)
 
   for (const embedded of [false, true]) {
     const mode = embedded ? 'embedding' : 'hash'
     const entries = entriesOf(size, embedded)
-    const json = JSON.stringify(entries.map(e => ({ key: e.key, namespace: e.namespace, hasEmbedding: true, accessCount: e.accessCount, ...(e.vector && { embedding: e.vector }) })))
+    const json = JSON.stringify(entries.map(e => ({ key: e.key, namespace: e.namespace, hasEmbedding: true, accessCount: e.accessCount, ...(e.vector && { embeddingQ8: encodeEmbeddingQ8(e.vector) }) })))
     const { points } = layout(entries)
     const spaces = spacesOf(entries)
     const hits = new Set(points.slice(0, 20).map(p => `${p.namespace}/${p.key}`))
@@ -73,7 +76,9 @@ for (const size of [1000, 10_000]) {
 
     const ctx = /** @type {never} */ ({ kit, state, act, columns: 100, nowMs: 5_000, pictures: new Map() })
 
+    console.log(`  [${mode}] stdout ${(json.length / 1000).toFixed(0)} KB`)
     row(`[${mode}] mapEntriesOf (parse)`, () => mapEntriesOf(json))
+    if (embedded) row(`[${mode}] similar-by-meaning (health)`, () => semanticDuplicates([...entries]))
     // Cold rows hand a fresh array each call (layout is remembered per array); the copy is ~0.1 ms at 10k and is inside the figure.
     row(`[${mode}] layout (cold)`, () => layout([...entries]))
     row(`[${mode}] memmapPicture`, () => memmapPicture(points, spaces, hits, 100))

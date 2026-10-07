@@ -5,7 +5,8 @@ import { cleanText } from '../data/wf-clean'
 import { CONTROL_TAB, controlLine } from '../data/wf-control'
 import { pick } from '../data/workflows-nav'
 import { workflowsModelOf } from '../wf-live'
-import { ago, button, clip, col, row, rule, text, THEME, type Ctx } from './common'
+import { ago, clip, col, rule, text, THEME, type Ctx } from './common'
+import { flow, safe } from './wf-layout'
 import './wf-register'
 import { DETAIL_TAB, slotsFor, type SlotEnv } from './wf-slots'
 import { workflowsView } from './workflows'
@@ -19,26 +20,18 @@ function guarded<T>(id: string, ctx: Ctx, draw: () => T, fallback: (line: Render
   }
 }
 
-const press = (run: () => void): (() => void) => () => {
-  try {
-    run()
-  } catch {
-    // A slot's handler that throws changes nothing; the page stays as it was.
-  }
-}
-
 /** The movement and run-switch buttons: j k move, b and l pick the column (h is Help's), u and i switch run (a hotkey is one letter or digit, so not [ and ]), d inspects. */
-function moves(ctx: Ctx, isInspecting: boolean): RenderElement {
+function moves(ctx: Ctx, isInspecting: boolean): RenderElement[] {
   const act = ctx.act.workflows
 
-  return row(ctx, [
-    button(ctx, 'wf-prev', 'prev', () => act.key('k'), { hotkey: 'k' }),
-    button(ctx, 'wf-next', 'next', () => act.key('j'), { hotkey: 'j' }),
-    button(ctx, 'wf-col-phases', '◂ phases', () => act.key('h'), { hotkey: 'b' }),
-    button(ctx, 'wf-col-agents', 'agents ▸', () => act.key('l'), { hotkey: 'l' }),
-    button(ctx, 'wf-run-prev', '◂ run', () => act.key('['), { hotkey: 'u' }),
-    button(ctx, 'wf-run-next', 'run ▸', () => act.key(']'), { hotkey: 'i' }),
-    button(ctx, 'wf-inspect', isInspecting ? 'Close inspector' : 'Inspect', () => act.key('enter'), { hotkey: 'd' }),
+  return flow(ctx, [
+    { key: 'wf-prev', label: 'prev', onPress: () => act.key('k'), hotkey: 'k' },
+    { key: 'wf-next', label: 'next', onPress: () => act.key('j'), hotkey: 'j' },
+    { key: 'wf-col-phases', label: '◂ phases', onPress: () => act.key('h'), hotkey: 'b' },
+    { key: 'wf-col-agents', label: 'agents ▸', onPress: () => act.key('l'), hotkey: 'l' },
+    { key: 'wf-run-prev', label: '◂ run', onPress: () => act.key('['), hotkey: 'u' },
+    { key: 'wf-run-next', label: 'run ▸', onPress: () => act.key(']'), hotkey: 'i' },
+    { key: 'wf-inspect', label: isInspecting ? 'Close inspector' : 'Inspect', onPress: () => act.key('enter'), hotkey: 'd' },
   ], 'wf-moves')
 }
 
@@ -60,21 +53,21 @@ export function workflowsPage(ctx: Ctx): RenderElement {
   const rows: RenderElement[] = [workflowsView(ctx, model, ui, { ask: spec => act.ask(spec), show: act.show })]
 
   if (env !== null && env.run !== null && ctx.columns >= 44) {
-    rows.push(moves(ctx, env.ui.isInspecting))
+    rows.push(...moves(ctx, env.ui.isInspecting))
 
     const extras = [
-      ...slotsFor('key').map(slot => button(ctx, `wf-key-${slot.id}`, slot.label, press(() => slot.run(env)), { hotkey: slot.key })),
-      ...slotsFor('action').map(slot => button(ctx, `wf-act-${slot.id}`, slot.label, press(() => act.ask(slot.spec(env), slot.why)), slot.hotkey === undefined ? {} : { hotkey: slot.hotkey })),
+      ...slotsFor('key').map(slot => ({ key: `wf-key-${slot.id}`, label: slot.label, onPress: safe(() => slot.run(env)), hotkey: slot.key })),
+      ...slotsFor('action').map(slot => ({ key: `wf-act-${slot.id}`, label: slot.label, onPress: safe(() => act.ask(slot.spec(env), slot.why)), ...(slot.hotkey === undefined ? {} : { hotkey: slot.hotkey }) })),
     ]
 
-    if (extras.length > 0) rows.push(row(ctx, extras, 'wf-extras'))
+    if (extras.length > 0) rows.push(...flow(ctx, extras, 'wf-extras'))
 
     // Stop and message are the control tab's (ADR-465) where it is registered; where it is not, this says where that is done instead of a dead button.
     if (env.run.kind === 'workflow') rows.push(text(ctx, controlLine(slotsFor('tab').some(slot => slot.id === CONTROL_TAB)), { dimColor: true }))
   }
 
   if (env !== null && tabs.length > 0) {
-    rows.push(row(ctx, [text(ctx, 'tabs'), button(ctx, 'wf-tab-detail', `${slotTab === undefined ? '●' : '○'} detail`, () => act.tab(DETAIL_TAB)), ...tabs.map(slot => button(ctx, `wf-tab-${slot.id}`, `${slot.id === slotTab?.id ? '●' : '○'} ${slot.label}`, () => act.tab(slot.id)))], 'wf-tabs'))
+    rows.push(...flow(ctx, [{ key: 'wf-tab-detail', label: `${slotTab === undefined ? '●' : '○'} detail`, onPress: () => act.tab(DETAIL_TAB) }, ...tabs.map(slot => ({ key: `wf-tab-${slot.id}`, label: `${slot.id === slotTab?.id ? '●' : '○'} ${slot.label}`, onPress: () => act.tab(slot.id) }))], 'wf-tabs', 'tabs '))
     if (slotTab !== undefined) rows.push(...guarded(slotTab.id, ctx, () => slotTab.render(env), line => [line]))
   }
 

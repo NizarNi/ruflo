@@ -22,6 +22,12 @@ export type WorkflowsActions = {
   ask: (spec: ActionSpec | null, why?: string) => void
   /** Names a transcript's path on the footer outcome row, after checking it is inside the config directory's projects folder. */
   show: (path: string) => void
+  /**
+   * Runs `fn` every `ms` on the console's own clock (host.every) while this page is the one in front and the pane is shown, redrawing after each
+   * call, until `fn` answers false (or the page is closed or switched away: the console's stop cancels every timer). One timer per `name`; a
+   * second call with a name already running does nothing. A call that throws stops it.
+   */
+  tick?: (name: string, ms: number, fn: () => boolean) => void
 }
 
 /** True for a path under `<configDir>/projects/` with no `..` part: the only place a run's files live. */
@@ -48,6 +54,30 @@ export function workflowsActions(state: State, host: Host, runner: Runner): Work
     setUi: patch => {
       state.wf.ui = { ...state.wf.ui, ...patch }
       host.invalidate()
+    },
+    tick: (name, ms, fn) => {
+      const key = `wf-tick-${name}`
+
+      if (state.timers.has(key)) return
+
+      const stop = (): void => {
+        state.timers.get(key)?.cancel()
+        state.timers.delete(key)
+      }
+      const timer = host.every(ms, () => {
+        let keep = false
+
+        try {
+          keep = state.view === 'workflows' && !(state.isInteractive && !(state.pane.isOpen && state.pane.isShown)) && fn()
+        } catch {
+          keep = false
+        }
+
+        host.invalidate()
+        if (!keep) stop()
+      })
+
+      state.timers.set(key, timer)
     },
     ask: (spec, why = 'that cannot run here') => runner.ask(spec, why),
     show: path => {

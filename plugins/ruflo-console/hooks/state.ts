@@ -114,6 +114,8 @@ export type Options = GuardOptions & ConvoOptions & {
   look: 'bbs' | 'plain'
   /** With the bbs look, a short dial-up boot screen when the cockpit opens. */
   boot: boolean
+  /** ADR-474: keep the Events and Timeline history in `.claude-flow/console/` (events.jsonl, lanes.jsonl). On by default; masked text only. */
+  eventsPersist: boolean
 }
 
 const num = (value: unknown, fallback: number, lo: number, hi: number): number => {
@@ -127,7 +129,7 @@ export function optionsOf(raw: PluginOptions | undefined): Options {
   const value = (raw ?? {}) as Record<string, unknown>
 
   return {
-    cli: typeof value.cli === 'string' && value.cli in CLI_PREFIXES ? (value.cli as CliChoice) : 'npx-offline',
+    cli: typeof value.cli === 'string' && Object.hasOwn(CLI_PREFIXES, value.cli) ? (value.cli as CliChoice) : 'npx-offline',
     refreshSeconds: num(value.refreshSeconds, 3, 2, 60),
     fps: num(value.fps, 8, 0, 12),
     bar: value.bar === 'on' || value.bar === 'off' ? value.bar : 'auto',
@@ -135,6 +137,7 @@ export function optionsOf(raw: PluginOptions | undefined): Options {
     federationNetwork: value.federationNetwork === true,
     look: value.look === 'plain' ? 'plain' : 'bbs',
     boot: value.boot !== false,
+    eventsPersist: value.eventsPersist !== false && value.eventsPersist !== 'false',
     ...guardOptionsOf(raw),
     ...convoOptionsOf(raw),
   }

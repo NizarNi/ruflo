@@ -151,7 +151,7 @@ describe('live: load, restore, write', () => {
       list: async () => [],
     }
     const host = { fs, run: async (argv: readonly string[], _t: number, stdin?: string) => (writes.push({ argv, stdin }), { exitCode: exit, stdout: '', stderr: '' }) } as never
-    const state = newState()
+    const state = newState({})
 
     state.cwd = CWD
     state.view = 'workflows'

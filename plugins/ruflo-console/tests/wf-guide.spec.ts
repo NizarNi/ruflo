@@ -208,7 +208,7 @@ describe('the slots', () => {
     return { state, ctx: { kit, state, nowMs: 1_000, columns: 120, pictures: new Map(), act }, asked }
   }
   const envOf = (ctx: Ctx, run: WfRun): SlotEnv => ({ ctx, runs: [run], run, phase: run.phases[0] ?? null, agent: run.phases[0]?.agents[0] ?? null, ui: { run: 0, phase: 0, agent: 0, column: 'agents', isInspecting: true }, nowMs: 1_000 })
-  const slot = <K extends 'board' | 'tab'>(kind: K, id: string) => slotsFor(kind).find(candidate => candidate.id === id) as never as { render: (env: SlotEnv) => unknown[]; when?: (env: SlotEnv) => boolean }
+  const slot = <K extends 'board' | 'tab'>(kind: K, id: string) => slotsFor(kind).find(candidate => (candidate as unknown as { id: string }).id === id) as never as { render: (env: SlotEnv) => unknown[]; when?: (env: SlotEnv) => boolean }
   const ledger = (state: State): MissionRecord => {
     const mission = { id: 'm1', objective: 'Ship it', profile: 'feature', rigor: 'standard', tasks: [{ id: 'implement', title: 'Implement', phase: 'R', stage: 'Build', agent: 'coder', requirement: 'it works', dependsOn: [] }], acceptance: [], events: [], paused: false, cancelled: false, auto: false, createdAtMs: 0 } as MissionRecord
 

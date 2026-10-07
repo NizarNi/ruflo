@@ -19,6 +19,8 @@ export type Msg = {
   state: SendState | 'you' | 'received'
   tokensIn?: number
   tokensOut?: number
+  /** One figure with no in/out split (the codex CLI reports "tokens used" only). */
+  tokensTotal?: number
   costUsd?: number
   model?: string
 }
@@ -83,14 +85,14 @@ export function addMessage(convo: Convo, target: string, entry: Omit<Msg, 'id'>)
 /** Records what you sent and what came of it (the answer, the queue note or the reason it did not go). */
 export function recordSend(convo: Convo, target: Target, body: string, result: SendResult, nowMs: number): void {
   addMessage(convo, target.id, { atMs: nowMs, who: 'you', text: body, state: 'you' })
-  addMessage(convo, target.id, { atMs: nowMs, who: 'target', text: result.text, state: result.state, ...(result.tokensIn !== undefined && { tokensIn: result.tokensIn }), ...(result.tokensOut !== undefined && { tokensOut: result.tokensOut }), ...(result.costUsd !== undefined && { costUsd: result.costUsd }), ...(result.model !== undefined && { model: result.model }) })
+  addMessage(convo, target.id, { atMs: nowMs, who: 'target', text: result.text, state: result.state, ...(result.tokensIn !== undefined && { tokensIn: result.tokensIn }), ...(result.tokensOut !== undefined && { tokensOut: result.tokensOut }), ...(result.tokensTotal !== undefined && { tokensTotal: result.tokensTotal }), ...(result.costUsd !== undefined && { costUsd: result.costUsd }), ...(result.model !== undefined && { model: result.model }) })
 }
 
-export type Stats = { sent: number; answered: number; failed: number; tokensIn: number; tokensOut: number; usd: number | null; pricedAnswers: number }
+export type Stats = { sent: number; answered: number; failed: number; tokensIn: number; tokensOut: number; tokensTotal: number; usd: number | null; pricedAnswers: number }
 
 /** Per-thread totals. USD sums only the answers whose provider reported one: `usd` is null when none did (n/a, not $0). */
 export function statsOf(thread: Thread): Stats {
-  const stats: Stats = { sent: 0, answered: 0, failed: 0, tokensIn: 0, tokensOut: 0, usd: null, pricedAnswers: 0 }
+  const stats: Stats = { sent: 0, answered: 0, failed: 0, tokensIn: 0, tokensOut: 0, tokensTotal: 0, usd: null, pricedAnswers: 0 }
 
   for (const msg of thread.msgs) {
     if (msg.who === 'you') stats.sent++
@@ -99,6 +101,7 @@ export function statsOf(thread: Thread): Stats {
 
     stats.tokensIn += msg.tokensIn ?? 0
     stats.tokensOut += msg.tokensOut ?? 0
+    stats.tokensTotal += msg.tokensTotal ?? 0
 
     if (msg.costUsd !== undefined) {
       stats.usd = (stats.usd ?? 0) + msg.costUsd
@@ -123,7 +126,7 @@ export function compareOf(convo: Convo, targets: readonly Target[]): CompareCell
       label: target.label,
       text: answer?.text ?? (askedAt < 0 ? 'not asked' : 'no answer yet'),
       state: answer?.state ?? 'none',
-      tokens: answer === undefined || (answer.tokensIn === undefined && answer.tokensOut === undefined) ? 'tokens n/a' : `${answer.tokensIn ?? '?'} in · ${answer.tokensOut ?? '?'} out`,
+      tokens: answer?.tokensTotal !== undefined && answer.tokensIn === undefined && answer.tokensOut === undefined ? `${answer.tokensTotal} total (no in/out split reported)` : answer === undefined || (answer.tokensIn === undefined && answer.tokensOut === undefined) ? 'tokens n/a' : `${answer.tokensIn ?? '?'} in · ${answer.tokensOut ?? '?'} out`,
       usd: answer?.costUsd === undefined ? 'cost n/a' : `$${answer.costUsd.toFixed(4)} (billed, as the provider reported it)`,
     }
   })
@@ -151,7 +154,7 @@ export const transcriptName = (target: string, nowMs: number): string => `convo-
 /** The thread as markdown, masked again here whatever the thread holds, and cut at the cap (the cut says how much was left out). */
 export function transcriptMarkdown(thread: Thread, target: Target, nowMs: number): { text: string; isCut: boolean } {
   const head = [`# Conversation with ${tidy(target.label, 80)}`, '', `Saved ${new Date(nowMs).toISOString()} by the ruflo console. Transport: ${target.transport}. ${target.leavesText}.`, thread.dropped > 0 ? `The ${thread.dropped} oldest messages were dropped by the ${MAX_MSGS}-message cap.` : '', '']
-  const body = thread.msgs.map(msg => `**${msg.who === 'you' ? 'you' : tidy(target.label, 60)}** (${new Date(msg.atMs).toISOString()}, ${msg.state}${msg.tokensIn !== undefined || msg.tokensOut !== undefined ? `, ${msg.tokensIn ?? '?'} in / ${msg.tokensOut ?? '?'} out tokens` : ''}${msg.costUsd === undefined ? '' : `, $${msg.costUsd.toFixed(4)} billed`}):\n\n${tidy(msg.text, MAX_TEXT)}\n`)
+  const body = thread.msgs.map(msg => `**${msg.who === 'you' ? 'you' : tidy(target.label, 60)}** (${new Date(msg.atMs).toISOString()}, ${msg.state}${msg.tokensIn !== undefined || msg.tokensOut !== undefined ? `, ${msg.tokensIn ?? '?'} in / ${msg.tokensOut ?? '?'} out tokens` : msg.tokensTotal !== undefined ? `, ${msg.tokensTotal} tokens total` : ''}${msg.costUsd === undefined ? '' : `, $${msg.costUsd.toFixed(4)} billed`}):\n\n${tidy(msg.text, MAX_TEXT)}\n`)
   const all = [...head, ...body].join('\n')
 
   return all.length <= TRANSCRIPT_MAX ? { text: all, isCut: false } : { text: `${all.slice(0, TRANSCRIPT_MAX)}\n\n(cut at ${TRANSCRIPT_MAX} characters; ${all.length - TRANSCRIPT_MAX} more were not saved)\n`, isCut: true }

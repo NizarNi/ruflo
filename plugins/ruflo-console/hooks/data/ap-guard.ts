@@ -9,7 +9,7 @@ import { ESCAPES, HIDDEN, INVISIBLE } from './parse'
 import { ANATOLE_STALE_MS } from './anatole'
 import type { EffectFact, Preflight, TaskFact } from './ap-loop'
 import type { AnatoleFacts } from './anatole'
-import type { Spend } from './ap-envelope'
+import type { Envelope, Spend } from './ap-envelope'
 import type { ReaderFs } from './files'
 
 const DENIES = DENY_PATTERNS
@@ -107,7 +107,27 @@ export type ToolCheck = (tool: string, input?: unknown) => Promise<{ decision?: 
 /** The tool a class is checked through. A class whose representative tool the person's settings would block is parked, never tried. */
 export const PREFLIGHT_TOOL: Record<ToolClass, string> = { read: 'Read', test: 'Bash', edit: 'Edit', 'git-local': 'Bash', 'git-branch': 'Bash', spawn: 'Agent', mcp: 'mcp__plugin_ruflo-core_ruflo__task_update', network: 'WebFetch' }
 
-export async function preflightAll(check: ToolCheck | undefined): Promise<Record<string, Preflight>> {
+/**
+ * The input the engine is asked about for a class. The engine decides on a call's INPUT (a path rule, a command prefix rule), so a probe with
+ * no input is answered `ask` for everything (found live: with acceptEdits and the test command allowed, an empty-input Read, Edit and
+ * Bash all said ask, and every task was parked). The input is a call the envelope itself allows: a file in its first folder, its first
+ * verify command, a host from its network list. A class the envelope has nothing representative for is asked with no input, as before.
+ */
+export function preflightInput(cls: ToolClass, env: Envelope | null): unknown {
+  const root = env?.paths[0]
+
+  if (env === null || root === undefined) return {}
+  if (cls === 'read') return { file_path: `${root}/preflight-probe` }
+  if (cls === 'edit') return { file_path: `${root}/preflight-probe`, old_string: 'a', new_string: 'b' }
+  if (cls === 'test') return env.verify[0] === undefined ? {} : { command: env.verify[0].join(' ') }
+  if (cls === 'git-local') return { command: 'git status' }
+  if (cls === 'git-branch') return { command: 'git switch -c preflight-probe' }
+  if (cls === 'network') return env.network[0] === undefined ? {} : { url: `https://${env.network[0]}/` }
+
+  return {}
+}
+
+export async function preflightAll(check: ToolCheck | undefined, env: Envelope | null = null): Promise<Record<string, Preflight>> {
   const out: Record<string, Preflight> = {}
 
   for (const cls of TOOL_CLASSES) {
@@ -117,7 +137,7 @@ export async function preflightAll(check: ToolCheck | undefined): Promise<Record
     }
 
     try {
-      const answer = await check(PREFLIGHT_TOOL[cls])
+      const answer = await check(PREFLIGHT_TOOL[cls], preflightInput(cls, env))
       const decision = typeof answer === 'string' ? answer : answer?.decision
 
       out[cls] = decision === 'allow' ? 'allow' : decision === 'deny' ? 'deny' : decision === 'ask' ? 'ask' : 'unwired'

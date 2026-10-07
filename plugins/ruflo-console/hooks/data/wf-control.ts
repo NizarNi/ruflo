@@ -1,13 +1,15 @@
 /**
- * Stop, Message and Redirect for a running workflow run or agent (ADR-465). Pure: the run, the agent and the bridge in, `ActionSpec`s out.
- * Each spec goes through the page's confirm card, which shows the EXACT engine call; the call itself is `$.tool.call` (through the host's
- * `toolCall`), so the engine's permission check and dialog decide it, never this file. What the spike proved, and no more:
+ * Stop, Message and Redirect for a running workflow run or agent (ADR-465, measured in ADR-471). Pure: the run, the agent and the bridge in,
+ * `ActionSpec`s out. Each spec goes through the page's confirm card, which shows the EXACT engine call; the call itself is `$.tool.call`
+ * (through the host's `toolCall`), so the engine's permission check and dialog decide it, never this file. What an interactive session
+ * answered (Claude Code 2.1.289, 2026-10-06, evidence in ADR-471):
  *
- *   TaskStop     verified on a real background agent (task_id = the agent's id): "Successfully stopped task", then status "killed".
- *                For a workflow run's id, or the id of an agent inside a workflow run, no one has tried it: the engine's own answer is shown.
- *   SendMessage  verified only to QUEUE a message for a named or id-addressed background agent in this session
- *                ("Message queued for delivery ... at its next tool round"). Delivery and being acted on are not verified.
- *   Redirect     the stop above (same proof), then the resume text prepared in the prompt box (never sent): two halves, said as two.
+ *   TaskStop     the WORKFLOW'S TASK id (the `taskId` of the Workflow tool's result, read from the session transcript) stops the whole run and
+ *                its agents. The `wf_` run id and the id of an agent inside the run are answered "No task found": no single workflow agent can
+ *                be stopped through the engine. (An Agent-tool agent is a different case, see ADR-471; this page never lists those.)
+ *   SendMessage  to a RUNNING workflow agent's id: delivered into that agent's own transcript within milliseconds and acted on. To a finished
+ *                one: "could not be resumed". By its label: "not reachable".
+ *   Redirect     the run stop above, then the resume text prepared in the prompt box (never sent): two halves, said as two.
  *
  * A refusal (`deny`) is shown and nothing else is tried: no other route is used to do what the engine would not. A failed or unreachable
  * call keeps the person's choice: the same words as a prepared prompt are one button away. Everything drawn is masked first.
@@ -23,8 +25,8 @@ import type { WfAgent, WfRun } from './workflows'
 export type Bridge = Pick<Host, 'toolCall' | 'toolCheck'>
 
 export type ControlKind = 'stop-agent' | 'stop-run' | 'message' | 'redirect' | 'text'
-/** How much of the path is known: what the spike showed, or what nobody has tried. */
-export type Proof = 'verified' | 'queued-only' | 'unverified' | 'prefill'
+/** What was measured: it worked, the engine refuses it, or nothing is called (the text is only prepared). */
+export type Proof = 'verified' | 'does-not-work' | 'prefill'
 
 export type ControlAction = {
   id: ControlKind
@@ -39,9 +41,14 @@ export type ControlAction = {
   why: string
 }
 
+/** Where a run's task id stands: found in the session transcript, or why not (still being read, no transcript, not in it). */
+export type TaskRef = { id: string } | { why: string }
+
 export type ControlInput = {
   run: WfRun
   agent: WfAgent | null
+  /** The Workflow tool's task id for the run (TaskStop takes this, not the `wf_` run id): read from the session transcript by the view. */
+  task: TaskRef
   /** The sentence typed for Message and Redirect. */
   text: string
   bridge: Bridge & Pick<Host, 'fillPrompt'>
@@ -58,6 +65,37 @@ export const controlLine = (isOn: boolean): string => (isOn ? 'Stop, message and
 
 /** An id the engine hands out is letters, digits, dash and underscore; anything else is not passed to a tool. */
 export const ENGINE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/
+
+/** Which build and day the capability words below were measured on (ADR-471). */
+export const MEASURED = { version: '2.1.289', date: '2026-10-06' } as const
+const AT = `Claude Code ${MEASURED.version}, ${MEASURED.date}`
+
+const RUN_ID = /^wf_[A-Za-z0-9-]{1,40}$/
+
+/** The text a task-id search looks for in the session transcript: the Workflow tool's launch result carries its `taskId` and `runId` together. */
+export const taskPattern = (runId: string): string => `"taskId":"[A-Za-z0-9]{6,40}","taskType":"local_workflow"[^}]{0,600}"runId":"${runId}"`
+
+/**
+ * The Workflow task id of a run in the text of its session transcript (or of a search's matching lines); null when it is not there. A RESUMED
+ * run keeps its run id and gets a new task id (measured: `resumeFromRunId` answered the same runId with a different taskId), so the LAST launch wins.
+ */
+export function taskIdOf(text: string, runId: string): string | null {
+  if (!RUN_ID.test(runId)) return null
+
+  const hits = [...text.matchAll(new RegExp(taskPattern(runId), 'g'))]
+  const last = hits.at(-1)
+
+  return last === undefined ? null : (/"taskId":"([A-Za-z0-9]{6,40})"/.exec(last[0])?.[1] ?? null)
+}
+
+/** The session transcript that launched a run: the run's directory (`<session>/subagents/workflows/<run>`) without its tail, plus `.jsonl`. Null when the path is not a run path. */
+export function transcriptOf(run: Pick<WfRun, 'dir'>, isRunPath: (path: string) => boolean): string | null {
+  if (run.dir === undefined || !isRunPath(run.dir)) return null
+
+  const session = run.dir.replace(/\/subagents\/workflows\/[^/]+\/?$/, '')
+
+  return session === run.dir ? null : `${session}.jsonl`
+}
 
 const CAP = 240
 const stopCall = (id: string): string => `TaskStop ${JSON.stringify({ task_id: id })}`
@@ -93,7 +131,7 @@ export function classifyReply(reply: ToolReply | undefined): Outcome {
   return { ok: true, kind: 'done', text: said === '' ? 'the engine answered ok with no text' : said }
 }
 
-const clean = (value: string): string => cleanText(plain(value, 400)).slice(0, CAP)
+const clean = (value: string): string => cleanText(plain(value.replace(/<\/?tool_use_error>/g, ''), 400)).slice(0, CAP)
 
 /** Calls one tool and classifies the answer; a rejection (no such tool, aborted) is an error outcome, never thrown. */
 export async function callTool(bridge: Bridge, input: { tool: string } & Record<string, unknown>): Promise<Outcome> {
@@ -168,9 +206,11 @@ function stopSpec(input: ControlInput, id: string, label: string, proofNote: str
   }
 }
 
+const STOP_AGENT_ANSWER = (id: string): string => `TaskStop {"task_id":"${id}"} is answered "No task found with ID: ${id}"`
+
 /**
- * What the control tab offers for the cursor. Message and Redirect need the typed sentence; every action says what it sends, how far its
- * path is proven and what to do where it is not. A ruflo swarm agent is not a Claude task: its stop and notes are the page's own.
+ * What the control tab offers for the cursor. Message and Redirect need the typed sentence; every action says what it sends and what the
+ * engine answered when it was tried (ADR-471). A ruflo swarm agent is not a Claude task: its stop and notes are the page's own.
  */
 export function controlActions(input: ControlInput): ControlAction[] {
   const { run, agent, bridge } = input
@@ -183,33 +223,35 @@ export function controlActions(input: ControlInput): ControlAction[] {
     return out
   }
 
-  const runId = ENGINE_ID.test(run.id) ? run.id : null
+  const taskId = 'id' in input.task && ENGINE_ID.test(input.task.id) ? input.task.id : null
+  const taskWhy = 'why' in input.task ? input.task.why : 'the run\'s task id is not one the engine can be given'
   const agentId = agent !== null && ENGINE_ID.test(agent.id) ? agent.id : null
   const wired = bridge.toolCall !== undefined
   const typed = guardText(input.text, 300)
   const resume = typed.ok ? resumeText(run, agent, typed.text, input.isRunPath) : null
+  const stopWhy = !wired ? 'this host does not bind tool calls: stop it in Claude Code\'s Workflows panel' : taskWhy
 
   add({
     id: 'stop-agent',
     label: agent === null ? 'stop the agent' : `stop agent ${clean(agent.label).slice(0, 30)}`,
-    proof: 'verified',
-    proofText: 'TaskStop worked on a real background agent (task_id = its id; its status became killed). An agent inside a workflow run has not been tried: the engine says.',
-    spec: !wired ? null : agentId === null ? null : stopSpec(input, agentId, `stop agent ${clean(agent?.label ?? agentId).slice(0, 40)}`, 'Proven on a background Agent-tool agent; for an agent of a workflow run the engine\'s answer is the proof.'),
-    why: !wired ? 'this host does not bind tool calls: prepare the text instead' : agent === null ? 'pick an agent first (the cursor)' : 'that agent\'s id is not one the engine can be given',
+    proof: 'does-not-work',
+    proofText: `does not work: the engine stops a whole workflow run, not one agent of it. ${STOP_AGENT_ANSWER(agentId ?? '<agent id>')} (${AT}). Use "stop the whole run".`,
+    spec: null,
+    why: `the engine cannot stop one workflow agent: ${STOP_AGENT_ANSWER(agentId ?? '<agent id>')}; stop the whole run instead`,
   })
 
   add({
     id: 'stop-run',
     label: `stop the whole run ${clean(run.name).slice(0, 30)}`,
-    proof: 'unverified',
-    proofText: 'TaskStop with a workflow run\'s id was not tried in the spike. The call is real and permission-checked; the engine\'s answer, and the run read again, say whether it took.',
-    spec: !wired || runId === null ? null : stopSpec(input, runId, `stop workflow run ${clean(run.name).slice(0, 40)}`, 'Not proven for a workflow run id: the engine may answer that no such task exists.'),
-    why: !wired ? 'this host does not bind tool calls: stop it in Claude Code\'s Workflows panel' : 'that run\'s id is not one the engine can be given',
+    proof: 'verified',
+    proofText: `verified: TaskStop with the run's TASK id stopped the run and both of its agents mid-tool-call (${AT}). The wf_ run id is answered "No task found", so the task id is read from the session transcript.`,
+    spec: !wired || taskId === null ? null : stopSpec(input, taskId, `stop workflow run ${clean(run.name).slice(0, 40)}`, 'The id is the Workflow tool\'s task id for this run, read from the session transcript. A run started by another session is answered "No task found".'),
+    why: stopWhy,
   })
 
   if (!typed.ok) {
-    add({ id: 'message', label: 'message the agent', proof: 'queued-only', proofText: 'SendMessage queued a message for a running named agent in this session; whether it was delivered and acted on was not verified.', spec: null, why: typed.why })
-    add({ id: 'redirect', label: 'redirect: stop, then resume with guidance', proof: 'unverified', proofText: 'Half one is the stop (see above); half two is text prepared in your prompt box.', spec: null, why: typed.why })
+    add({ id: 'message', label: 'message the agent', proof: 'verified', proofText: MESSAGE_TEXT, spec: null, why: typed.why })
+    add({ id: 'redirect', label: 'redirect: stop, then resume with guidance', proof: 'verified', proofText: REDIRECT_TEXT, spec: null, why: typed.why })
 
     return out
   }
@@ -222,9 +264,9 @@ export function controlActions(input: ControlInput): ControlAction[] {
           label: `message agent ${clean(agent?.label ?? to).slice(0, 40)}`,
           args: [],
           shows: messageCall(to, typed.text),
-          expect: 'the engine answers that the message was queued',
+          expect: 'the engine answers that the message was sent to the agent',
           declared: 'write',
-          note: 'Calls the engine\'s SendMessage through the session\'s permission check. The spike showed it QUEUES a message at the agent\'s next tool round; it did not show the agent reads or acts on it. An agent that is not a running, reachable one is answered "not reachable" and nothing is sent.',
+          note: `Calls the engine's SendMessage through the session's permission check. Measured (${AT}): to a RUNNING workflow agent's id it lands in that agent's own transcript within milliseconds; the answer says "Resuming agent", and the agent may also show as a background agent. A finished or stopped agent is answered "could not be resumed: No transcript found"; its label is answered "not reachable". Whatever the agent then does (a tool needing approval) raises its own dialog.`,
           run: async () => {
             const verdict = await permissionOf(bridge, 'SendMessage', { to, message: typed.text })
 
@@ -232,22 +274,22 @@ export function controlActions(input: ControlInput): ControlAction[] {
 
             const outcome = await callTool(bridge, { tool: 'SendMessage', to, message: typed.text, summary: typed.text.slice(0, 40) })
 
-            input.report('message agent', outcome.ok, outcome.ok ? `${outcome.text} (queued is not delivered: the agent may never act on it)` : `${outcome.text}${outcome.kind === 'denied' ? ': nothing was sent and no other route is tried' : ' (use "prepare as text" to ask the main session to relay it)'}`)
+            input.report('message agent', outcome.ok, outcome.ok ? `${outcome.text} (the engine's words; it is delivered while the agent runs, and a finished agent is answered "could not be resumed")` : `${outcome.text}${outcome.kind === 'denied' ? ': nothing was sent and no other route is tried' : ' (use "prepare as text" to ask the main session to relay it)'}`)
           },
         }
 
-  add({ id: 'message', label: agent === null ? 'message the agent' : `message ${clean(agent.label).slice(0, 30)}`, proof: 'queued-only', proofText: 'Queued for delivery at the agent\'s next tool round (verified on a named background agent); delivery and effect are not.', spec: messageSpec, why: !wired ? 'this host does not bind tool calls: prepare the text instead' : agent === null ? 'pick an agent first (the cursor)' : 'that agent\'s id is not one the engine can be given' })
+  add({ id: 'message', label: agent === null ? 'message the agent' : `message ${clean(agent.label).slice(0, 30)}`, proof: 'verified', proofText: MESSAGE_TEXT, spec: messageSpec, why: !wired ? 'this host does not bind tool calls: prepare the text instead' : agent === null ? 'pick an agent first (the cursor)' : 'that agent\'s id is not one the engine can be given' })
 
   const redirectSpec: ActionSpec | null =
-    !wired || runId === null || resume === null
+    !wired || taskId === null || resume === null
       ? null
-      : stopSpec(input, runId, `redirect run ${clean(run.name).slice(0, 36)}: stop, then prepare the resume`, 'Half one of two: the stop. Half two prepares the resume text in your prompt box, only when the stop worked.', async () => {
+      : stopSpec(input, taskId, `redirect run ${clean(run.name).slice(0, 36)}: stop, then prepare the resume`, 'Half one of two: the stop. Half two prepares the resume text in your prompt box, only when the stop worked.', async () => {
           const isFilled = await Promise.resolve(bridge.fillPrompt(resume)).catch(() => false)
 
           return isFilled ? 'The resume text with your guidance is in the prompt box: press Enter there to resume.' : 'There is no prompt box to put the resume text in.'
         })
 
-  add({ id: 'redirect', label: 'redirect: stop, then resume with guidance', proof: 'unverified', proofText: 'Half one is the stop (TaskStop, proof as the run stop); half two is text prepared in your prompt box and never sent for you.', spec: redirectSpec === null ? null : { ...redirectSpec, shows: `${stopCall(runId ?? '')}, then into the prompt box: ${resume?.slice(0, 120) ?? ''}` }, why: !wired ? 'this host does not bind tool calls: prepare the text instead' : 'this run has no id the engine can be given' })
+  add({ id: 'redirect', label: 'redirect: stop, then resume with guidance', proof: 'verified', proofText: REDIRECT_TEXT, spec: redirectSpec === null ? null : { ...redirectSpec, shows: `${stopCall(taskId ?? '')}, then into the prompt box: ${resume?.slice(0, 120) ?? ''}` }, why: stopWhy })
 
   const prompt = relayText(run, agent, typed.text)
 
@@ -255,3 +297,6 @@ export function controlActions(input: ControlInput): ControlAction[] {
 
   return out
 }
+
+const MESSAGE_TEXT = `verified: a message to a RUNNING workflow agent's id arrived in that agent's own transcript within ~30 ms and it began to act on it (${AT}). A finished agent: "could not be resumed". Its label: "not reachable".`
+const REDIRECT_TEXT = `verified: the stop (as "stop the whole run", ${AT}); the resume is only text prepared in your prompt box, never sent for you.`

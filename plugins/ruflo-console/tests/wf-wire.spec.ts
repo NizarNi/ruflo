@@ -267,7 +267,7 @@ describe('the keys', () => {
     for (const key of ['p', 'x', 'r', 'h', 'y', 'n']) expect(hotkeys, `hotkey ${key}`).not.toContain(key)
     expect(new Set(buttons(tree).map(el => el.props.key)).size).toBe(buttons(tree).length)
     // Pressing a button moves the cursor.
-    buttonOf(tree, 'wf-col-agents')?.props.onPress?.call(undefined)
+    ;(buttonOf(tree, 'wf-col-agents')?.props.onPress as (() => void) | undefined)?.()
     expect(world.state.wf.ui.column).toBe('agents')
   })
 
@@ -346,7 +346,7 @@ describe('the page', () => {
     expect(words(first.tree)).toMatch(/extra for/)
     expect(words(first.tree)).toMatch(/slot bad failed: exploded/)
     expect(buttonOf(first.tree, 'wf-key-mark')?.props.hotkey).toBe('m')
-    buttonOf(first.tree, 'wf-act-act')?.props.onPress?.call(undefined)
+    ;(buttonOf(first.tree, 'wf-act-act')?.props.onPress as (() => void) | undefined)?.()
     expect(asked).toEqual([{ spec, why: 'nothing to do' }])
     // The tab shows only while the inspector is open.
     expect(buttonOf(first.tree, 'wf-tab-cost')).toBeUndefined()
@@ -356,7 +356,7 @@ describe('the page', () => {
     const open = pageOf(world.state, world.host)
 
     expect(buttonOf(open.tree, 'wf-tab-cost')).toBeDefined()
-    buttonOf(open.tree, 'wf-tab-cost')?.props.onPress?.call(undefined)
+    ;(buttonOf(open.tree, 'wf-tab-cost')?.props.onPress as (() => void) | undefined)?.()
     expect(words(pageOf(world.state, world.host).tree)).toMatch(/tab body/)
     expect(world.state.wf.tab).toBe('cost')
     workflowsActions(world.state, world.host, {} as never).tab('nope')

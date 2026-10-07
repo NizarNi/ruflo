@@ -63,7 +63,7 @@ function threadRows(ctx: Ctx, target: Target, convoOf: ReturnType<typeof liveOf>
   if (thread === undefined || thread.msgs.length === 0) return [text(ctx, `No messages with @${target.id} yet.`, { dimColor: true })]
 
   const stats = statsOf(thread)
-  const rows: RenderElement[] = [text(ctx, `${stats.sent} sent · ${stats.answered} answered · ${stats.failed} failed · tokens ${stats.tokensIn === 0 && stats.tokensOut === 0 ? 'n/a' : `${stats.tokensIn} in / ${stats.tokensOut} out`} · cost ${stats.usd === null ? 'n/a (no billed figure reported)' : `$${stats.usd.toFixed(4)} billed`}${thread.dropped > 0 ? ` · ${thread.dropped} oldest dropped at the ${MAX_MSGS}-message cap` : ''}`, { dimColor: true })]
+  const rows: RenderElement[] = [text(ctx, `${stats.sent} sent · ${stats.answered} answered · ${stats.failed} failed · tokens ${stats.tokensIn === 0 && stats.tokensOut === 0 ? (stats.tokensTotal === 0 ? 'n/a' : `${stats.tokensTotal} total`) : `${stats.tokensIn} in / ${stats.tokensOut} out${stats.tokensTotal === 0 ? '' : ` + ${stats.tokensTotal} total`}`} · cost ${stats.usd === null ? 'n/a (no billed figure reported)' : `$${stats.usd.toFixed(4)} billed`}${thread.dropped > 0 ? ` · ${thread.dropped} oldest dropped at the ${MAX_MSGS}-message cap` : ''}`, { dimColor: true })]
 
   for (const msg of thread.msgs.slice(-SHOWN)) {
     const color = msg.who === 'you' ? THEME.info : STATE_COLOR[msg.state]

@@ -117,7 +117,7 @@ describe('stop is never undone', () => {
 
     const run = r.host.run
 
-    r.host.run = (async () => ({ exitCode: 1, stdout: '', stderr: 'no space left on device' })) as typeof r.host.run
+    r.host.run = (async () => ({ exitCode: 1, stdout: '', stderr: 'no space left on device' })) as unknown as typeof r.host.run
     await stopNow(state, r.host, 'disk is full')
     expect(r.toasts.join()).toContain('this session only')
 
@@ -218,7 +218,7 @@ describe('what adaptation learns', () => {
 })
 
 describe('the panel', () => {
-  it('has one Stop key: the key slot owns 9 and the board button carries none, so a press cannot run it twice', () => {
+  it('the Stop button carries no hotkey (the digits are view keys), so no key can open another page instead of stopping', () => {
     const r = rig()
     const state = stateWith([])
 

@@ -107,11 +107,12 @@ describe('rerunText', () => {
     expect(text.join('\n')).toMatch(/stays cached.*build:b \(Build\)/)
   })
 
-  it('tells the person to stop a running run first (the console cannot), and says when the journal was not read', () => {
+  it('tells the person to stop a running run first (the Control tab asks and calls TaskStop with the run task id: verified on 2.1.289), and says when the journal was not read', () => {
     const run = { ...finished(), running: 1 }
     const text = rerunText(run, failedOf(triageRun(run, null)), false) ?? []
 
-    expect(text[0]).toMatch(/Stop the run first \(the console cannot/)
+    expect(text[0]).toMatch(/Stop the run first \(the Control tab's Stop asks first and calls TaskStop with the run's task id: verified to stop the whole run on Claude Code 2\.1\.289; it cannot stop a single agent/)
+    expect(text[0]).not.toMatch(/unverified/)
     expect(text.join('\n')).toMatch(/journal was not read/)
   })
 

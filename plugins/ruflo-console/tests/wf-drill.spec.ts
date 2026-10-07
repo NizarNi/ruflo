@@ -59,7 +59,9 @@ describe('the panel', () => {
     const agent = screen(world)
 
     expect(drillOf(world.state)).toMatchObject({ level: 'agent', sub: 'activity' })
-    expect(agent).toMatch(/Agent · Activity/)
+    expect(agent).toMatch(/Agent: build:x/)
+    expect(agent).not.toMatch(/Agent · /)
+    expect(agent).toMatch(/● Activity/)
     expect(agent).toMatch(/Bash\s+ls -la/)
     expect(agent).toMatch(/Edit\s+\/work\/proj\/.*a\.ts/)
     expect(agent).toMatch(/transcript: whole file/)

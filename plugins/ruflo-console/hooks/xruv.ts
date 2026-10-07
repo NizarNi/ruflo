@@ -9,6 +9,7 @@
 import type { ActionSpec } from './actions'
 import { jsonAfter, registryProbe, rosterProbe, channelsProbe, type Channels, type Registry, type Roster } from './data/cli'
 import { plain, recordOf, stringOf } from './data/parse'
+import { isoOf } from './data/safe'
 import { envelopeOf, messageOf, shortKey, swarmProbe, workClaimsProbe, type WorkClaims } from './data/xruv'
 import { labLines } from './mh-lab'
 import type { State } from './state'
@@ -99,6 +100,9 @@ export function admitArg(raw: string): { pubkey: string; role: 'member' | 'admin
 /** An invite code in any text, masked: it is a bearer secret, so no line the console writes ever carries one. */
 export const maskInvites = (line: string): string => line.replace(INVITE_ANYWHERE, 'v2.•••• (invite code, masked)')
 
+/** True when the text holds an invite code (a bearer secret the person minted: it never goes to a model). */
+export const hasInvite = (text: string): boolean => new RegExp(INVITE_ANYWHERE.source).test(text)
+
 const exec = (tool: string, params: Record<string, unknown>) => ['mcp', 'exec', '-t', tool, '-p', JSON.stringify(params)] as const
 
 const ROOM_ID_RE = /^[A-Za-z0-9_.:@#/-]{1,128}$/
@@ -156,7 +160,7 @@ export function xruvLines(id: string, stdout: string, stderr = '', nowMs = Date.
   } else if (id === 'x-claims') {
     const board = workClaimsProbe.parse(stdout) as WorkClaims | null
 
-    if (board !== null) out.push(board.claims.length === 0 ? 'no open claims on the board' : `${board.claims.length} claimed resources`, ...board.claims.map(claim => `${claim.resource} · ${claim.owner}${claim.from !== undefined ? ` (${claim.from})` : ''}${claim.expiresAtMs !== undefined ? ` · until ${new Date(claim.expiresAtMs).toISOString().slice(0, 16)}Z` : ''}`))
+    if (board !== null) out.push(board.claims.length === 0 ? 'no open claims on the board' : `${board.claims.length} claimed resources`, ...board.claims.map(claim => `${claim.resource} · ${claim.owner}${claim.from !== undefined ? ` (${claim.from})` : ''}${claim.expiresAtMs !== undefined ? ` · until ${isoOf(claim.expiresAtMs).slice(0, 16)}Z` : ''}`))
   } else if (id === 'x-sync' || id === 'x-read') {
     const data = recordOf(found?.data)
     const list = Array.isArray(data?.messages) ? data.messages : null
@@ -234,7 +238,7 @@ function spec(state: State, id: string, base: Omit<ActionSpec, 'board' | 'lab' |
 }
 
 /** A network read: the click is the consent, so it runs at once; the same argv the option's probe runs. */
-const read = (id: string, label: string, args: readonly string[], fills: string) => (state: State) => spec(state, id, { label, args, expect: 'its output on the board', isReadOnly: true, timeoutMs: 60_000 }, fills)
+const read = (id: string, label: string, args: readonly string[], fills: string) => (state: State) => spec(state, id, { label, args, expect: 'its output on the board', isReadOnly: true, declared: 'network', timeoutMs: 60_000 }, fills)
 
 const admin = (state: State, make: () => ActionSpec | null): ActionSpec | null => (state.xruv.hasAdminToken === true ? make() : null)
 const hasKey = (state: State) => state.snapshot?.hasNostrKey === true
@@ -287,7 +291,7 @@ export const XRUV: readonly XEntry[] = [
         expect: 'its messages on the board',
         timeoutMs: 60_000,
         // The read signs NIP-42 with your key; with none yet, the CLI would make one, so that first read asks.
-        ...(hasKey(state) ? { isReadOnly: true } : { note: `network: reads ${RELAY}; ${MAKES_KEY}` }),
+        ...(hasKey(state) ? { isReadOnly: true, declared: 'network' as const } : { note: `network: reads ${RELAY}; ${MAKES_KEY}` }),
       })
     },
     why: () => 'name a channel: pub:<name>, prv:<16 hex>, or a bare name for its public channel',

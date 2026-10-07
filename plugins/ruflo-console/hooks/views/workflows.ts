@@ -1,11 +1,12 @@
 import type { RenderElement } from 'claude-code'
 
 import type { ActionSpec } from '../actions'
-import { fmtElapsed, fmtTokens, modelName, currentPhase, shortId, type AgentState, type WfAgent, type WfPhase, type WfRun } from '../data/workflows'
+import { fmtElapsed, fmtTokens, modelName, currentPhase, type AgentState, type WfAgent, type WfPhase, type WfRun } from '../data/workflows'
 import { pick, type WfUi } from '../data/workflows-nav'
 import { CONTROL_TAB, controlLine } from '../data/wf-control'
 import { spawnAgent, stopAgent } from '../ops'
-import { button, clip, col, kv, row, rule, text, THEME, type Ctx } from './common'
+import { clip, col, kv, row, rule, text, THEME, type Ctx } from './common'
+import { flow, runTag } from './wf-layout'
 import { slotsFor } from './wf-slots'
 
 /** What the workflows view asks of the controller: a confirm-gated ruflo verb, or to name a transcript's path. */
@@ -41,7 +42,7 @@ function header(ctx: Ctx, run: WfRun, runs: readonly WfRun[], at: number): Rende
   const tabs = runs.length > 1 ? runs.map((entry, i) => `${i === at ? '▸' : ' '}${i + 1} ${clip(entry.name, 18)}`).join('  ') : ''
 
   return [
-    row(ctx, [ctx.kit.Text({ bold: true, children: `${clip(run.name, Math.max(8, ctx.columns - 24))} ` }), ctx.kit.Text({ ...(tone !== undefined && { color: tone }), children: run.state })]),
+    row(ctx, [ctx.kit.Text({ bold: true, wrap: 'truncate-end', children: `${clip(run.name, Math.max(8, ctx.columns - 24))} ` }), ctx.kit.Text({ wrap: 'truncate-end', ...(tone !== undefined && { color: tone }), children: run.state })]),
     text(ctx, `${run.total} agents · ${counts} · ${tokens}${span}`, { dimColor: true }),
     ...(tabs === '' ? [] : [text(ctx, `${tabs}   [ ] switch run`, { dimColor: true })]),
   ]
@@ -91,10 +92,10 @@ function inspect(ctx: Ctx, run: WfRun, agent: WfAgent, hooks: WorkflowsHooks): R
     rows.push(kv(ctx, 'health / tasks', `${a.health === undefined ? 'n/a' : `${Math.round(a.health * 100)}%`} · ${a.taskCount ?? 'n/a'} tasks`))
     rows.push(kv(ctx, 'model / tokens', 'n/a (ruflo records neither per agent)'))
     rows.push(
-      row(ctx, [
-        button(ctx, 'wf-stop', 'Stop agent', () => { const spec = stopAgent(a); if (spec !== null) hooks.ask(spec) }),
-        button(ctx, 'wf-spawn', `Spawn another ${a.type}`, () => { const spec = spawnAgent(a.type, ctx.nowMs); if (spec !== null) hooks.ask(spec) }),
-      ]),
+      ...flow(ctx, [
+        { key: 'wf-stop', label: 'Stop agent', onPress: () => { const spec = stopAgent(a); if (spec !== null) hooks.ask(spec) } },
+        { key: 'wf-spawn', label: `Spawn another ${a.type}`, onPress: () => { const spec = spawnAgent(a.type, ctx.nowMs); if (spec !== null) hooks.ask(spec) } },
+      ], 'wf-agent-actions'),
     )
 
     return rows
@@ -111,7 +112,7 @@ function inspect(ctx: Ctx, run: WfRun, agent: WfAgent, hooks: WorkflowsHooks): R
   if (agent.transcriptPath !== undefined) {
     const path = agent.transcriptPath
 
-    rows.push(row(ctx, [button(ctx, 'wf-open', 'Open transcript', () => hooks.show(path), { hotkey: 'o' })]))
+    rows.push(...flow(ctx, [{ key: 'wf-open', label: 'Open transcript', onPress: () => hooks.show(path), hotkey: 'o' }], 'wf-open-row'))
   }
 
   rows.push(text(ctx, run.kind === 'workflow' ? controlLine(slotsFor('tab').some(slot => slot.id === CONTROL_TAB)) : '', { dimColor: true }))
@@ -179,7 +180,7 @@ export function workflowsView(ctx: Ctx, model: WorkflowsModel | null, ui: WfUi, 
   }
 
   if (model.more > 0) rows.push(text(ctx, `+${model.more} older runs not shown`, { dimColor: true }))
-  if (wide && !here.ui.isInspecting) rows.push(text(ctx, `${shortId(run.id)} · d inspects the agent · u/i switches run`, { dimColor: true }))
+  if (wide && !here.ui.isInspecting) rows.push(text(ctx, `${runTag(run.id)} · d inspects the agent · u/i switches run`, { dimColor: true }))
 
   return col(ctx, rows, 'workflows')
 }

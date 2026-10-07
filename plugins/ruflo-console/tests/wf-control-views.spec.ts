@@ -17,6 +17,7 @@ import { resetControl, stopSlotSpec, wireWfControl } from '../hooks/views/wf-con
 import { workflowsPage } from '../hooks/views/wf-page'
 import { slotsFor, type SlotEnv } from '../hooks/views/wf-slots'
 import { workflowsActions } from '../hooks/wf-actions'
+import { LAUNCH_LINE, REAL } from './fixtures/control-real'
 import { liveOf, refreshFacts, resetConvo, saveTranscript, sendSpec, stopWatch, watchSpec } from '../hooks/wf-convo-live'
 import { targetsFor } from '../hooks/wf-convo-live'
 
@@ -42,16 +43,24 @@ const wfRun = (over: Partial<WfRun> = {}): WfRun => ({ id: 'wf_abc12345', name: 
 
 type Fake = { host: Host; tools: Record<string, unknown>[]; runs: { argv: readonly string[]; stdin?: string }[]; http: { url: string; headers: Record<string, string>; body: string }[]; prompts: string[]; every: { ms: number; fn: () => void; cancelled: boolean }[]; invalidated: () => number; bbs: { text: string }[] }
 
-function fake(over: { tool?: boolean; peers?: string; stat?: boolean } = {}): Fake {
+/** The session transcript the run was launched from, as the real Workflow launch line wrote it (with this file's run id). */
+const TRANSCRIPT = '/home/u/.claude/projects/-p/sess.jsonl'
+const LAUNCH = LAUNCH_LINE.replace('wf_186c6243-718', 'wf_abc12345')
+const settle = async (): Promise<void> => void (await new Promise(resolve => setTimeout(resolve, 5)))
+
+let launchLines = (): string => LAUNCH
+
+function fake(over: { tool?: boolean; peers?: string; stat?: boolean; transcript?: 'ok' | 'missing' | 'other' | 'huge' } = {}): Fake {
   const out: Fake = { host: undefined as never, tools: [], runs: [], http: [], prompts: [], every: [], invalidated: () => 0, bbs: [] }
   let invalidated = 0
   const host = {
     home: async () => '/home/u',
-    fs: { read: async (path: string) => (path.endsWith('peers.json') ? (over.peers ?? '{"peers":[{"host":"zenbook","trusted":true}]}') : Promise.reject(new Error('ENOENT'))), stat: async () => (over.stat === true ? { size: 1 } : Promise.reject(new Error('ENOENT'))), list: async () => [] },
+    fs: { read: async (path: string) => (path.endsWith('peers.json') ? (over.peers ?? '{"peers":[{"host":"zenbook","trusted":true}]}') : path === TRANSCRIPT && (over.transcript ?? 'ok') !== 'missing' ? (over.transcript === 'other' ? LAUNCH.replace('wf_abc12345', 'wf_zzz') : launchLines()) : Promise.reject(new Error('ENOENT'))), stat: async (path: string) => (path === TRANSCRIPT && over.transcript !== 'missing' ? { size: over.transcript === 'huge' ? 9_000_000 : 500 } : over.stat === true ? { size: 1 } : Promise.reject(new Error('ENOENT'))), list: async () => [] },
     run: async (argv: readonly string[], _ms: number, stdin?: string) => {
       out.runs.push({ argv, ...(stdin !== undefined && { stdin }) })
 
       if (argv[0] === 'which') return { exitCode: 0, stdout: '/usr/bin/codex', stderr: '' }
+      if (argv[0] === 'grep') return { exitCode: 0, stdout: LAUNCH.match(/"taskId":"wyp2n5acy".*?"runId":"wf_abc12345"/)?.[0] ?? '', stderr: '' }
       if (argv[0] === 'printenv') return { exitCode: 0, stdout: 'key-value-1234567\n', stderr: '' }
       if (argv.includes('federation_bbs_watch')) return { exitCode: 0, stdout: `Result:\n${JSON.stringify({ envelopes: [{ envelopeId: 'e1', payload: { text: 'peer: use sharding' }, timestamp: '2026-10-05T00:00:00Z' }] })}`, stderr: '' }
 
@@ -72,7 +81,7 @@ function fake(over: { tool?: boolean; peers?: string; stat?: boolean } = {}): Fa
 
       return { ok: true, status: 200, text: JSON.stringify({ model: 'm', choices: [{ message: { content: `answer from ${url.includes('a.example') ? 'A' : 'B'}` } }], usage: { prompt_tokens: 3, completion_tokens: 4 } }) }
     },
-    ...(over.tool === false ? {} : { toolCall: async (input: Record<string, unknown>) => { out.tools.push(input); return { text: '{"message":"Successfully stopped task: acf991387298086c7 (sleeper)"}' } }, toolCheck: async () => ({ decision: 'allow' as const }) }),
+    ...(over.tool === false ? {} : { toolCall: async (input: Record<string, unknown>) => { out.tools.push(input); return REAL.stopWorkflowTask as never }, toolCheck: async () => ({ decision: 'allow' as const }) }),
   } as unknown as Host
 
   out.host = host
@@ -83,6 +92,9 @@ function fake(over: { tool?: boolean; peers?: string; stat?: boolean } = {}): Fa
 
 const world = (): { state: State; ctx: Ctx; asked: { spec: ActionSpec | null; why: string }[] } => {
   const state = newState({})
+
+  state.configDir = '/home/u/.claude'
+
   const asked: { spec: ActionSpec | null; why: string }[] = []
   const act = { workflows: { ask: (spec: ActionSpec | null, why = '') => void asked.push({ spec, why }), setUi: () => undefined } } as unknown as Actions
 
@@ -113,34 +125,104 @@ describe('registration beside the other features', () => {
 describe('the control tab', () => {
   beforeEach(() => resetFolds())
 
-  it('draws the exact call and the proof of each action, and the stop button asks with a card that shows the call', async () => {
+  it('draws the exact call and the measured proof of each action, and the stop button asks with a card that shows the call', async () => {
     const { ctx, asked } = world()
     const f = fake()
 
     wireWfControl(ctx.state, f.host)
+    expect(words(tab('control').render(envOf(ctx)))).toMatch(/reading the session transcript/)
+    await settle()
 
     const tree = tab('control').render(envOf(ctx))
     const text = words(tree)
 
-    expect(text).toContain(`call: TaskStop {"task_id":"${AGENT}"}`)
-    expect(text).toMatch(/proof: verified · TaskStop worked on a real background agent/)
-    expect(text).toMatch(/proof: unverified · TaskStop with a workflow run's id was not tried/)
-    expect(text).toMatch(/proof: queued-only/)
+    expect(text).toContain('call: TaskStop {"task_id":"wyp2n5acy"}')
+    expect(text).toMatch(/proof: verified · verified: TaskStop with the run's TASK id stopped the run/)
+    expect(text).toMatch(/proof: does-not-work · does not work: the engine stops a whole workflow run, not one agent/)
+    expect(text).toMatch(/call: none \(the engine cannot stop one workflow agent: TaskStop \{"task_id":"acf991387298086c7"\} is answered "No task found with ID/)
     expect(text).toContain('bound: each call goes through the engine')
-    press(tree, 'wf-control-stop-agent')
-    expect(asked[0]?.spec?.shows).toBe(`TaskStop {"task_id":"${AGENT}"}`)
+    expect(text).not.toMatch(/unverified|queued-only/)
+    press(tree, 'wf-control-stop-run')
+    expect(asked[0]?.spec?.shows).toBe('TaskStop {"task_id":"wyp2n5acy"}')
     expect(f.tools).toHaveLength(0)
     await asked[0]?.spec?.run?.()
-    expect(f.tools).toEqual([{ tool: 'TaskStop', task_id: AGENT }])
+    expect(f.tools).toEqual([{ tool: 'TaskStop', task_id: 'wyp2n5acy' }])
     expect(ctx.state.outcome).toMatchObject({ ok: true, detail: expect.stringContaining('Successfully stopped task') })
     resetControl(ctx.state)
   })
 
-  it('typing the message makes Message and Redirect real, with the exact SendMessage on the card', () => {
+  it('the stop button of one agent has no spec and says why: the engine would answer "No task found"', async () => {
+    const { ctx, asked } = world()
+
+    wireWfControl(ctx.state, fake().host)
+    tab('control').render(envOf(ctx))
+    await settle()
+    press(tab('control').render(envOf(ctx)), 'wf-control-stop-agent')
+    expect(asked[0]?.spec).toBeNull()
+    expect(asked[0]?.why).toMatch(/cannot stop one workflow agent/)
+  })
+
+  it('a resumed run keeps its run id and gets a new task id: the id is read again after a few seconds, and the card then shows the new one', async () => {
+    const { ctx } = world()
+    const real = Date.now
+
+    launchLines = () => LAUNCH
+    wireWfControl(ctx.state, fake().host)
+    tab('control').render(envOf(ctx))
+    await settle()
+    expect(words(tab('control').render(envOf(ctx)))).toContain('call: TaskStop {"task_id":"wyp2n5acy"}')
+
+    launchLines = () => `${LAUNCH}\n${LAUNCH.replace('wyp2n5acy', 'wekh7caqa')}`
+    Date.now = () => real() + 6_000
+
+    try {
+      expect(words(tab('control').render(envOf(ctx)))).toContain('wyp2n5acy')
+      await settle()
+      expect(words(tab('control').render(envOf(ctx)))).toContain('call: TaskStop {"task_id":"wekh7caqa"}')
+    } finally {
+      Date.now = real
+      launchLines = () => LAUNCH
+    }
+  })
+
+  it('a run launched by another session (its task id is not in this transcript) cannot be stopped from here, and says so', async () => {
+    for (const transcript of ['missing', 'other'] as const) {
+      const { ctx, asked } = world()
+      const f = fake({ transcript })
+
+      wireWfControl(ctx.state, f.host)
+      tab('control').render(envOf(ctx))
+      await settle()
+      press(tab('control').render(envOf(ctx)), 'wf-control-stop-run')
+      expect(asked[0]?.spec).toBeNull()
+      expect(asked[0]?.why).toMatch(/Workflows panel|not there/)
+      expect(f.tools).toHaveLength(0)
+    }
+  })
+
+  it('a transcript too large to read is searched with grep (fixed argv, a checked path), and only the ids come back', async () => {
+    const { ctx, asked } = world()
+    const f = fake({ transcript: 'huge' })
+
+    wireWfControl(ctx.state, f.host)
+    tab('control').render(envOf(ctx))
+    await settle()
+    press(tab('control').render(envOf(ctx)), 'wf-control-stop-run')
+
+    const grep = f.runs.find(entry => entry.argv[0] === 'grep')
+
+    expect(grep?.argv.slice(0, 3)).toEqual(['grep', '-o', '-E'])
+    expect(grep?.argv[3]).toContain('"runId":"wf_abc12345"')
+    expect(grep?.argv[4]).toBe(TRANSCRIPT)
+    expect(asked[0]?.spec?.shows).toBe('TaskStop {"task_id":"wyp2n5acy"}')
+  })
+
+  it('typing the message makes Message and Redirect real, with the exact SendMessage on the card', async () => {
     const { ctx, asked } = world()
 
     wireWfControl(ctx.state, fake().host)
     type(tab('control').render(envOf(ctx)), 'wf-control-text', 'use the cache')
+    await settle()
 
     const tree = tab('control').render(envOf(ctx))
 
@@ -158,7 +240,7 @@ describe('the control tab', () => {
     const tree = tab('control').render(envOf(ctx))
 
     expect(words(tree)).toMatch(/not bound in this build/)
-    press(tree, 'wf-control-stop-agent')
+    press(tree, 'wf-control-stop-run')
     expect(asked[0]?.spec).toBeNull()
     expect(asked[0]?.why).toMatch(/does not bind tool calls/)
   })
@@ -170,15 +252,17 @@ describe('the control tab', () => {
     expect(stopSlotSpec(envOf(ctx))).toBeNull()
   })
 
-  it('the stop button of the extras row stops the picked agent, or the run when none is picked', () => {
+  it('the stop button of the extras row always stops the whole run (the engine cannot stop one agent), picked agent or not', async () => {
     const { ctx } = world()
 
     wireWfControl(ctx.state, fake().host)
-    expect(stopSlotSpec(envOf(ctx))?.shows).toContain(AGENT)
-    expect(stopSlotSpec({ ...envOf(ctx), agent: null })?.shows).toContain('wf_abc12345')
+    stopSlotSpec(envOf(ctx))
+    await settle()
+    expect(stopSlotSpec(envOf(ctx))?.shows).toBe('TaskStop {"task_id":"wyp2n5acy"}')
+    expect(stopSlotSpec({ ...envOf(ctx), agent: null })?.shows).toBe('TaskStop {"task_id":"wyp2n5acy"}')
   })
 
-  it('draws on the real page: the control tab and the stop button, beside the Conversation rule', () => {
+  it('draws on the real page: the control tab and the stop button, beside the Conversation rule', async () => {
     const { state } = world()
     const f = fake()
 
@@ -189,6 +273,10 @@ describe('the control tab', () => {
     state.wf.tab = 'control'
 
     const act = { workflows: workflowsActions(state, f.host, { ask: () => undefined } as never) } as unknown as Actions
+
+    workflowsPage({ kit, state, nowMs: 1_000, columns: 120, pictures: new Map(), act })
+    await settle()
+
     const tree = workflowsPage({ kit, state, nowMs: 1_000, columns: 120, pictures: new Map(), act })
     const text = words(tree)
 

@@ -66,7 +66,7 @@ export type WfRun = {
 const asRecord = (value: unknown): Record<string, unknown> | null => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null)
 /** Escape sequences go whole (an OSC title or a hyperlink would otherwise leave its text behind), then control, zero-width and bidi-override characters (they reorder or hide text) become spaces: every string a file supplies passes here. */
 const CONTROL = HIDDEN
-const str = (value: unknown, max = 200): string | undefined => {
+export const str = (value: unknown, max = 200): string | undefined => {
   const clean = typeof value === 'string' ? value.replace(ESCAPES, '').replace(INVISIBLE, '').replace(CONTROL, ' ').slice(0, max) : ''
 
   return clean === '' ? undefined : clean
@@ -94,7 +94,10 @@ const SECRETISH = new RegExp(
   'gi',
 )
 export const maskSecrets = (text: string): string => text.replace(SECRETISH, '‹masked›')
-const num = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined)
+export const num = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined)
+
+/** A line longer than this is not read (ADR-473): the engine refuses files over 4 MiB and the console reads 3 MB whole, so no real line is this long, and the cap bounds what a half-written line can hold. */
+export const LINE_CAP = 3_000_000
 
 /** JSONL as records: a line that does not parse (a half-written tail) is dropped, never thrown on. */
 export function jsonLines(text: string | null): Record<string, unknown>[] {
@@ -103,7 +106,7 @@ export function jsonLines(text: string | null): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
 
   for (const line of text.split('\n')) {
-    if (line.length < 2 || line[0] !== '{') continue
+    if (line.length < 2 || line.length > LINE_CAP || line[0] !== '{') continue
 
     try {
       const record = asRecord(JSON.parse(line))

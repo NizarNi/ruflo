@@ -107,7 +107,7 @@ describe('the readers', () => {
   })
 
   it('asks for the same bounded list as the Namespaces sample, on the memory view only', () => {
-    expect(memmapProbe.args).toEqual(['memory', 'list', '--format', 'json', '--limit', '500'])
+    expect(memmapProbe.args).toEqual(['memory', 'list', '--format', 'json', '--limit', '500', '--embeddings'])
     expect(memmapProbe.views).toEqual(['memory'])
   })
 
@@ -223,7 +223,8 @@ describe('bounds', () => {
 describe('registration', () => {
   it('runs the memmap probe from the controller, so the read counts are not permanently n/a', async () => {
     const { readFileSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
 
-    expect(readFileSync(new URL('../hooks/controller.ts', import.meta.url), 'utf8')).toMatch(/ALL_PROBES = \[[^\]]*memmapProbe/)
+    expect(readFileSync(fileURLToPath(new URL('../hooks/controller.ts', import.meta.url) as never), 'utf8')).toMatch(/ALL_PROBES = \[[^\]]*memmapProbe/)
   })
 })

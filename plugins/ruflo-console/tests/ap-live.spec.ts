@@ -176,13 +176,15 @@ describe('a tick', () => {
     const parked = journal(r).find(e => e.t === 'parked')
 
     expect(parked).toMatchObject({ t: 'parked', task: 't2' })
-    expect(r.prompts).toEqual([])
+    // ADR-470: a park does not hold the others back, so the same pass goes on to the next ready task (the parked one was never handed over).
+    expect(r.prompts.length).toBe(1)
+    expect(r.prompts[0]).toContain('Review the module')
+    expect(r.prompts.join()).not.toContain('Publish the package')
 
     storeOf(state).adaptAtMs = T0 + 2000
     await apTick(state, r.host, T0 + 3000)
 
     expect(r.prompts.length).toBe(1)
-    expect(r.prompts[0]).toContain('Review the module')
   })
 
   it('crash-resume: a started step left by a dead process is settled by its effect, never run twice', async () => {
@@ -288,7 +290,7 @@ describe('writes', () => {
 
     const dd = r.runs.find(a => a[0] === 'dd')
 
-    expect(dd).toEqual(['dd', `of=${J}`, 'oflag=append', 'conv=notrunc', 'status=none'])
+    expect(dd).toEqual(['dd', `of=${J}`, 'oflag=append', 'conv=notrunc', 'bs=1M', 'iflag=fullblock', 'status=none'])
 
     const linked = rig()
 
@@ -304,11 +306,12 @@ describe('registration', () => {
     const before = slotsFor('key').map(s => s.key)
 
     expect(slotsFor('board').map(s => s.id)).toEqual(expect.arrayContaining(['autopilot', 'ap-parked']))
-    expect(slotsFor('key').find(s => s.id === 'ap-stop-key')?.key).toBe('9')
-    expect(slotsFor('action').find(s => s.id === 'ap-start')?.hotkey).toBe('8')
+    // ADR-470: no hotkeys. Digits and letters are view keys, and a slot hotkey equal to one loses to it.
+    expect(slotsFor('key').find(s => s.id === 'ap-stop-key')).toBeUndefined()
+    expect(slotsFor('action').find(s => s.id === 'ap-start')?.hotkey).toBeUndefined()
     expect(slotsFor('notice').map(s => s.id)).toContain('autopilot')
 
-    const keys = [...before, ...slotsFor('action').map(s => s.hotkey)]
+    const keys = [...before, ...slotsFor('action').map(s => s.hotkey)].filter(key => key !== undefined)
 
     expect(new Set(keys).size).toBe(keys.length)
     resetSlots()

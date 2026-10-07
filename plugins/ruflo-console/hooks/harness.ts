@@ -9,6 +9,7 @@
  * The person's text reaches an agent on stdin, never as an argument, so it cannot be read as a flag.
  */
 import type { ActionSpec } from './actions'
+import { ESCAPES, HIDDEN, INVISIBLE } from './data/parse'
 import type { Host } from './host'
 import { CLI_PREFIXES, PANE_ID, push, termStoreKeyOf, type AgentId, type HarnessId, type State, type TermLine } from './state'
 import { claudeParser, codexEvent, eventOf, type Sink } from './stream'
@@ -65,11 +66,8 @@ export function argvOf(state: State, agent: AgentId, text: string): readonly str
  * gone, tabs as two spaces, indentation kept. `trim` false keeps a trailing space (a token typed mid-sentence).
  */
 export function termText(line: string, max = 400, trim = true): string {
-  const cleaned = line
-    .replace(/\u001b\][^\u0007\u001b]*(\u0007|\u001b\\)/g, '')
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\t/g, '  ')
-    .replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, '')
+  // The same strip set as plain() (data/parse.ts), so a character one drops cannot get through the other (#3816).
+  const cleaned = line.replace(/\t/g, '  ').replace(ESCAPES, '').replace(INVISIBLE, '').replace(HIDDEN, '')
   const out = trim ? cleaned.trimEnd() : cleaned
 
   return out.length <= max ? out : `${out.slice(0, max - 1)}…`

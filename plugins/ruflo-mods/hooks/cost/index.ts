@@ -15,7 +15,18 @@ export function registerCost(on: On, state: ModState, options: ModOptions) {
   const limit = options.costBudgetUsd
   if (limit === undefined) return
   state.budget = { level: 'OK', limit }
-  let announced: BudgetLevel = 'OK' // the highest rung told; a fall and a second rise stay quiet
+  let announced: BudgetLevel = 'OK' // the highest rung told this session; a fall and a second rise stay quiet
+
+  // The budget is per session. /clear ends one (session.end, reason clear; no
+  // session.start follows) and the process goes on with the next one's cost
+  // counted from zero, so the ladder and the hard stop start over. Registered
+  // after the rollup, which records this session's rung before this runs.
+  on('session.end', { reason: /^clear$/ }, ($, e, next) => {
+    announced = 'OK'
+    state.budget = { level: 'OK', limit }
+    redraw(state)
+    return next(e)
+  })
 
   on('session.measure', async ($, e, next) => {
     const result = await next(e)

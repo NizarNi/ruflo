@@ -141,6 +141,28 @@ export function stepNow(ui: ReplayUi, tl: Timeline, nowMs: number): number {
   return step
 }
 
+/** The most events one clock tick may carry a playing replay over: a tick is bounded work however fast the speed or long the gap since the last. */
+export const TICK_MAX_STEPS = 400
+
+/**
+ * A playing replay brought up to `nowMs` and re-based there, so the next tick scans only the events that fall after it (never again from
+ * where play began). The clock keeps its fractional progress between two events (a step minutes apart at 16x is reached by ticks, not
+ * lost to each of them). It stops at the end, and carries at most TICK_MAX_STEPS events in one call. A paused replay is returned as it is.
+ */
+export function settle(ui: ReplayUi, tl: Timeline, nowMs: number): ReplayUi {
+  if (ui.playFromMs === null) return ui
+
+  const n = tl.events.length
+  const from = Math.max(0, Math.min(n, ui.step))
+  const clock = ui.baseMs + Math.max(0, nowMs - ui.playFromMs) * ui.speed
+  const reached = stepNow(ui, tl, nowMs)
+  const step = Math.min(reached, from + TICK_MAX_STEPS)
+
+  if (step >= n) return { ...ui, step: n, baseMs: offsetOf(tl, n), playFromMs: null }
+
+  return { ...ui, step, baseMs: step < reached ? offsetOf(tl, step) : clock, playFromMs: nowMs }
+}
+
 export const isPlaying = (ui: ReplayUi, tl: Timeline, nowMs: number): boolean => ui.playFromMs !== null && stepNow(ui, tl, nowMs) < tl.events.length
 
 export type ReplayCommand = 'next' | 'prev' | 'first' | 'last' | 'next-phase' | 'prev-phase' | 'play' | 'faster' | 'slower'

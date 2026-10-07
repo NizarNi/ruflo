@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { HiveInfo } from '../hooks/data/parse'
+import { CODEX, FEDERATION, REAL } from './fixtures/control-real'
 import { addMessage, applyFetch, compareOf, fanOutOf, fromBbs, fromChannel, lastAnswer, MAX_MSGS, MAX_THREADS, newConvo, pollParams, POLL_MAX, recordSend, relayBody, statsOf, threadOf, transcriptMarkdown, transcriptName, TRANSCRIPT_MAX } from '../hooks/data/wf-convo'
 import { chatBody, parseChat, payloadOf, sendTo, taskNote, type SendDeps } from '../hooks/data/wf-send'
 import { convoOptionsOf, endpointsOf, isBaseUrl, MAX_FANOUT, OPENROUTER, parseConfig, parseMentions, peersOf, targetsOf, type Target } from '../hooks/data/wf-targets'
@@ -24,16 +25,16 @@ function deps(over: Partial<SendDeps> & { env?: string | null; httpReply?: { ok:
     cwd: '/work/proj',
     hive,
     config: parseConfig('endpoint:metallm=https://gw.example.com/v1|COG_KEY|cognitum-auto; bbs:ops; x:pub:team'),
-    run: async (argv, timeoutMs, stdin) => {
+    run: (async (argv: readonly string[], timeoutMs: number, stdin?: string) => {
       rec.run.push({ argv, timeoutMs, ...(stdin !== undefined && { stdin }) })
 
       if (argv[0] === 'printenv') return over.env === null ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: `${over.env ?? KEY}\n`, stderr: '' }
 
       return over.runReply?.(argv) ?? { exitCode: 0, stdout: 'Result:\n{"success":true}', stderr: '' }
-    },
+    }) as unknown as SendDeps['run'],
     httpSend: async (url, init) => { rec.http.push({ url, init }); return over.httpReply ?? { ok: true, status: 200, text: JSON.stringify({ model: 'm', choices: [{ message: { content: 'an answer' } }], usage: { prompt_tokens: 12, completion_tokens: 5 } }) } },
     submitPrompt: async text => { rec.prompts.push(text) },
-    toolCall: async input => { rec.tool.push(input); return { text: '{"success":true,"message":"Message queued for delivery to sleeper at its next tool round."}' } },
+    toolCall: async input => { rec.tool.push(input); return REAL.messageNamedTeammateByName as never },
     toolCheck: async () => ({ decision: over.verdict ?? 'allow' }),
     ...over,
   }
@@ -167,7 +168,8 @@ describe('the exact payload on the card equals what is sent', () => {
     const queued = await sendTo(d, t(d, 'sleeper'), 'hello')
 
     expect(rec.tool).toEqual([{ tool: 'SendMessage', to: 'acf991387298086c7', message: 'hello', summary: 'hello' }])
-    expect(queued).toMatchObject({ ok: true, state: 'queued', text: expect.stringContaining('queued is not delivered') })
+    expect(queued).toMatchObject({ ok: true, state: 'queued', text: expect.stringContaining("Message sent to sleeper's inbox") })
+    expect(queued.text).toContain('it reaches the agent when its current turn ends')
 
     await sendTo(d, t(d, 'bbs-ops'), 'hello')
     await sendTo(d, t(d, 'peer-zenbook'), 'hello')
@@ -183,6 +185,44 @@ describe('the exact payload on the card equals what is sent', () => {
     expect(rec.run[3]).toMatchObject({ argv: ['codex', 'exec', '-s', 'read-only', '--skip-git-repo-check', '--ephemeral', '-C', '/work/proj', '-'], stdin: 'hello', timeoutMs: 300_000 })
     expect(argvs[4]).toContain('-t task_update -p {"taskId":"task-9","result":{"guidance":"look at the cache"}}')
     expect(rec.run[1]?.timeoutMs).toBe(600_000)
+  })
+
+  it('Codex: the real codex 0.160.0 answer is the final message on stdout, and its one \'tokens used\' figure is a TOTAL, not an output count', async () => {
+    const { d } = deps({ runReply: () => ({ exitCode: 0, stdout: CODEX.stdout, stderr: CODEX.stderr }) })
+    const answered = await sendTo(d, t(d, 'codex'), 'Reply with exactly the word: pong')
+
+    expect(answered).toMatchObject({ ok: true, state: 'reply', text: 'pong', tokensTotal: 5271 })
+    expect(answered.tokensOut).toBeUndefined()
+    expect(answered.tokensIn).toBeUndefined()
+    expect(payloadOf(t(d, 'codex'), 'x', d)).toMatchObject({ ok: true, payload: { shows: expect.stringContaining('codex exec -s read-only --skip-git-repo-check --ephemeral -C /work/proj -') } })
+
+    const convo = newConvo()
+
+    recordSend(convo, t(d, 'codex'), 'q', answered, 1)
+    expect(statsOf(convo.threads.get('codex') as never)).toMatchObject({ tokensTotal: 5271, tokensIn: 0, tokensOut: 0 })
+    expect(compareOf(convo, [t(d, 'codex')], 'q')[0]?.tokens).toBe('5271 total (no in/out split reported)')
+  })
+
+  it('Codex with no stdout, or a non-zero exit, is an error and nothing is invented', async () => {
+    const { d } = deps({ runReply: () => ({ exitCode: 1, stdout: '', stderr: 'codex: not logged in' }) })
+
+    expect(await sendTo(d, t(d, 'codex'), 'x')).toMatchObject({ ok: false, state: 'error', text: expect.stringContaining('not logged in') })
+  })
+
+  it('the federation helper: the argv the console builds is what federation.sh parses (host, then the prompt, then --confirm for an untrusted peer), and its real refusals come back as errors', async () => {
+    const trusted = deps({ runReply: () => ({ exitCode: FEDERATION.noSuchPeer.exitCode, stdout: FEDERATION.noSuchPeer.stdout, stderr: FEDERATION.noSuchPeer.stderr }) })
+    const gone = await sendTo(trusted.d, t(trusted.d, 'peer-zenbook'), 'hello')
+
+    expect(trusted.rec.run[0]?.argv).toEqual(['bash', '/home/u/.claude/helpers/federation.sh', 'dispatch', 'zenbook', 'hello'])
+    expect(gone).toMatchObject({ ok: false, state: 'error', text: FEDERATION.noSuchPeer.stderr.trim() })
+
+    const untrusted = deps({ runReply: () => ({ exitCode: FEDERATION.untrusted.exitCode, stdout: '', stderr: FEDERATION.untrusted.stderr }) })
+
+    expect(await sendTo(untrusted.d, t(untrusted.d, 'peer-ruv-mac-mini'), 'hello')).toMatchObject({ ok: false, state: 'error' })
+    expect(untrusted.rec.run[0]?.argv).toEqual(['bash', '/home/u/.claude/helpers/federation.sh', 'dispatch', 'ruv-mac-mini', 'hello', '--confirm'])
+    // The helper takes any non-flag word as the prompt: a body that starts with a dash would be eaten as an option, so it is refused before any argv exists.
+    expect(payloadOf(t(untrusted.d, 'peer-zenbook'), '--allow-destructive', untrusted.d)).toMatchObject({ ok: false })
+    expect(payloadOf(t(untrusted.d, 'peer-zenbook'), '--confirm', untrusted.d)).toMatchObject({ ok: false })
   })
 
   it('the engine\'s permission "deny" for SendMessage stops the send before the call', async () => {

@@ -27,14 +27,15 @@ export type SendDeps = Pick<Host, 'toolCall' | 'toolCheck' | 'run' | 'httpSend' 
 
 export type SendState = 'reply' | 'queued' | 'sent' | 'error' | 'refused'
 
-export type SendResult = { ok: boolean; state: SendState; text: string; tokensIn?: number; tokensOut?: number; costUsd?: number; model?: string }
+/** `tokensTotal` is for a provider that reports one figure without a split (the codex CLI's "tokens used"). */
+export type SendResult = { ok: boolean; state: SendState; text: string; tokensIn?: number; tokensOut?: number; tokensTotal?: number; costUsd?: number; model?: string }
 
 export type Payload = { shows: string; note: string }
 
 const REPLY_CAP = 4000
 const WAIT = { peer: 600_000, codex: 300_000, cli: 60_000, http: 120_000 }
 
-const err = (state: SendState, text: string): SendResult => ({ ok: false, state, text: tidy(text, 300) })
+const err = (state: SendState, text: string): SendResult => ({ ok: false, state, text: tidy(text, 300).trim() })
 
 /** Text from outside: escapes and control characters out, credentials masked, capped. */
 export const tidy = (value: string, max = REPLY_CAP): string => cleanText(value).slice(0, max)
@@ -71,7 +72,7 @@ export function payloadOf(target: Target, raw: string, deps: Pick<SendDeps, 'con
     case 'prompt':
       return done(`to Claude in this session, as a visible prompt: "${body}"`, 'Starts a turn of this session (billed as any turn is). Its answer is the next turn in the transcript.')
     case 'send-message':
-      return done(`SendMessage ${JSON.stringify({ to: target.ref, message: body })}`, 'The engine queues it for the agent\'s next tool round; delivery and effect are not verified.')
+      return done(`SendMessage ${JSON.stringify({ to: target.ref, message: body })}`, 'The engine puts it in the agent\'s inbox and delivers it when the agent\'s current turn ends (measured 161 and 165 s into a running agent\'s loop, Claude Code 2.1.289); the agent then acted on it within 2 s, and any tool it runs raises its own permission dialog.')
     case 'hive': {
       if (deps.hive === null) return { ok: false, why: 'there is no hive-mind to write to' }
 
@@ -151,7 +152,7 @@ export async function sendTo(deps: SendDeps, target: Target, raw: string): Promi
 
       const outcome = await callTool(deps, { tool: 'SendMessage', to: target.ref, message: body, summary: body.slice(0, 40) })
 
-      return outcome.ok ? { ok: true, state: 'queued', text: `${outcome.text} (queued is not delivered)` } : err(outcome.kind === 'denied' ? 'refused' : 'error', outcome.text)
+      return outcome.ok ? { ok: true, state: 'queued', text: `${outcome.text} (queued: it reaches the agent when its current turn ends)` } : err(outcome.kind === 'denied' ? 'refused' : 'error', outcome.text)
     }
     case 'hive': {
       if (target.ref === 'propose') {
@@ -178,13 +179,13 @@ export async function sendTo(deps: SendDeps, target: Target, raw: string): Promi
     case 'peer': {
       const result = await deps.run(['bash', deps.helper, 'dispatch', target.ref, body, ...(deps.trustedPeers.has(target.ref) ? [] : ['--confirm'])], WAIT.peer).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: error instanceof Error ? error.message : 'refused' }))
 
-      return result.exitCode === 0 && result.stdout.trim() !== '' ? { ok: true, state: 'reply', text: tidy(result.stdout) } : err('error', result.stderr.trim() !== '' ? result.stderr : `the peer answered nothing (exit ${result.exitCode})`)
+      return result.exitCode === 0 && result.stdout.trim() !== '' ? { ok: true, state: 'reply', text: tidy(result.stdout).trim() } : err('error', result.stderr.trim() !== '' ? result.stderr : `the peer answered nothing (exit ${result.exitCode})`)
     }
     case 'codex': {
       const result = await deps.run(['codex', 'exec', '-s', 'read-only', '--skip-git-repo-check', '--ephemeral', '-C', deps.cwd, '-'], WAIT.codex, body).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: error instanceof Error ? error.message : 'refused' }))
       const used = /tokens used\s*[:\n]\s*([\d,]+)/i.exec(result.stderr + result.stdout)?.[1]
 
-      return result.exitCode === 0 && result.stdout.trim() !== '' ? { ok: true, state: 'reply', text: tidy(result.stdout), ...(used !== undefined && { tokensOut: Number(used.replace(/,/g, '')) }) } : err('error', result.stderr.trim() !== '' ? result.stderr : `codex answered nothing (exit ${result.exitCode})`)
+      return result.exitCode === 0 && result.stdout.trim() !== '' ? { ok: true, state: 'reply', text: tidy(result.stdout).trim(), ...(used !== undefined && { tokensTotal: Number(used.replace(/,/g, '')) }) } : err('error', result.stderr.trim() !== '' ? result.stderr : `codex answered nothing (exit ${result.exitCode})`)
     }
     case 'http': {
       const endpoint = endpointOf(target, deps.config)

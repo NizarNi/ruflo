@@ -18,7 +18,8 @@ import { checkProcs, failureOf, inUseOf, planRemoval, readSummary, readWorktrees
 import type { Host } from '../host'
 import type { State } from '../state'
 import { workflowsModelOf } from '../wf-live'
-import { ago, button, clip, row, text, THEME, type Ctx } from './common'
+import { ago, clip, row, text, THEME, type Ctx } from './common'
+import { flow } from './wf-layout'
 import { registerSlot, type SlotEnv } from './wf-slots'
 
 type Store = { read: WtRead | null; check: ProcCheck | null; isReading: boolean; error: string | null; lastMs: number }
@@ -126,7 +127,7 @@ export function boardRows(env: SlotEnv): RenderElement[] {
   rows.push(text(ctx, check === null ? ' live processes: not checked (the read button, w, checks them; the timer never does)' : check.ok ? ` live processes: ${check.seen} working directories seen, ${ago(check.atMs, nowMs)}, your own processes only` : ` live processes: ${check.why ?? 'unknown'}`, { dimColor: check?.ok === true, ...(check?.ok === true ? {} : { color: THEME.warn }) }))
   rows.push(text(ctx, plan.targets.length > 0 ? ` cleanup: ${plan.targets.length} worktree${plan.targets.length === 1 ? '' : 's'} ready to remove${plan.more > 0 ? ` (${plan.more} more after these ${REMOVE_MAX})` : ''}; the button lists them first` : ` cleanup: ${plan.blocked ?? 'nothing to remove'}`, { color: plan.targets.length > 0 ? THEME.ok : undefined, dimColor: plan.targets.length === 0 }))
   rows.push(text(ctx, ' removed: the directory only, never the branch, never with --force; each is re-checked just before it goes', { dimColor: true }))
-  rows.push(row(ctx, [button(ctx, 'wt-read', store.isReading ? 'reading…' : 'read worktrees + live processes', () => void readFull(env.ctx.state))], 'wt-actions'))
+  rows.push(...flow(ctx, [{ key: 'wt-read', label: store.isReading ? 'reading…' : 'read worktrees + live processes', onPress: () => void readFull(env.ctx.state) }], 'wt-actions'))
 
   return rows
 }

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { compositeRank, explainPrompt, jaccard, lifecycleOrder, parseNeuralStore, parsePrompts, parseRanked, parseSessionRecall, readRecall, tokenize, trigrams, wouldPrune, type RecallFacts } from '../hooks/data/recall'
+import { compositeRank, digestOf, explainPrompt, jaccard, lifecycleOrder, parseNeuralStore, parsePrompts, parseRanked, parseSessionRecall, readRecall, tokenize, trigrams, wouldPrune, type RecallFacts } from '../hooks/data/recall'
 import { promoteSpec, pruneSpec, pruneUnusedSpec, recallEntries } from '../hooks/recall'
 import { readSnapshot } from '../hooks/data/snapshot'
 import { paletteEntries } from '../hooks/palette'
@@ -106,7 +106,7 @@ describe('parsers read only what is recorded', () => {
 })
 
 describe('the commands', () => {
-  const facts: RecallFacts = { ranked: parseRanked(RANKED), sessions: [], prompts: [], neural: parseNeuralStore(MODELS), reads: { ranked: 'ok', sessions: 'ok', prompts: 'ok', neural: 'ok', bank: 'too-large' } }
+  const facts: RecallFacts = { ranked: parseRanked(RANKED), sessions: [], prompts: [], neural: parseNeuralStore(MODELS), log: [], reads: { ranked: 'ok', sessions: 'ok', prompts: 'ok', neural: 'ok', bank: 'too-large', log: 'missing' } }
   const state = newState({ boot: false })
 
   state.snapshot = { recall: facts } as never
@@ -167,9 +167,10 @@ describe('the rows', () => {
   const facts: RecallFacts = {
     ranked: parseRanked(RANKED),
     sessions: [{ file: 'session-1.json', startedAtMs: 1, updatedAtMs: 1_791_249_000_000, ids: ['mem_a', 'mem_gone'] }],
-    prompts: [{ task: 'authentication token refresh', agent: 'coder', ok: true, atMs: 1_791_000_000_000 }],
+    prompts: [{ task: 'authentication token refresh', agent: 'coder', ok: true, atMs: 1_791_000_000_000, digest: digestOf('authentication token refresh') }],
     neural: parseNeuralStore(MODELS),
-    reads: { ranked: 'ok', sessions: 'ok', prompts: 'ok', neural: 'ok', bank: 'too-large' },
+    log: [],
+    reads: { ranked: 'ok', sessions: 'ok', prompts: 'ok', neural: 'ok', bank: 'too-large', log: 'missing' },
   }
 
   it('shows the recorded recall as ids resolved, and says what is not recorded', () => {
@@ -325,7 +326,7 @@ describe('what the scoring and the table promise', () => {
     expect(bare?.confidence).toBeNull()
     pickPrompt(`explain ${key}`)
 
-    const facts: RecallFacts = { ranked: { computedAtMs: 1, entries: bare === undefined ? [] : [bare] }, sessions: [{ file: 's', startedAtMs: 1, updatedAtMs: 1, ids: ['x'] }], prompts: [], neural: null, reads: { ranked: 'ok', sessions: 'ok', prompts: 'ok', neural: 'missing', bank: 'missing' } }
+    const facts: RecallFacts = { ranked: { computedAtMs: 1, entries: bare === undefined ? [] : [bare] }, sessions: [{ file: 's', startedAtMs: 1, updatedAtMs: 1, ids: ['x'] }], prompts: [], neural: null, log: [], reads: { ranked: 'ok', sessions: 'ok', prompts: 'ok', neural: 'missing', bank: 'missing', log: 'missing' } }
     const text = words(recallRows(ctxOf(facts)))
 
     pickPrompt(null)
@@ -335,7 +336,7 @@ describe('what the scoring and the table promise', () => {
 
   it('fits the lifecycle table in 80, 120 and 160 columns, and shows only SHOWN rows with the rest counted', () => {
     const patterns = Object.fromEntries(Array.from({ length: 15 }, (_, index) => [`pattern-1791244689589-${index}-abcdefg`, { id: `pattern-1791244689589-${index}-abcdefg`, name: 'fix: wire recordTrajectory into the hooks tools handler for everything', type: 'history-commit', content: 'c', metadata: { verdict: 'success' }, createdAt: '2026-09-27T17:34:15.801Z', usageCount: index }]))
-    const facts: RecallFacts = { ranked: null, sessions: [], prompts: [], neural: parseNeuralStore(JSON.stringify({ patterns })), reads: { ranked: 'missing', sessions: 'ok', prompts: 'missing', neural: 'ok', bank: 'ok' } }
+    const facts: RecallFacts = { ranked: null, sessions: [], prompts: [], neural: parseNeuralStore(JSON.stringify({ patterns })), log: [], reads: { ranked: 'missing', sessions: 'ok', prompts: 'missing', neural: 'ok', bank: 'ok', log: 'missing' } }
 
     for (const columns of [80, 120, 160]) {
       const ctx = { ...ctxOf(facts), columns } as Ctx

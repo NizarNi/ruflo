@@ -125,7 +125,7 @@ export function rerunText(run: WfRun, failed: readonly TriageItem[], hasJournal:
   const list = (items: readonly TriageItem[]): string => `${items.slice(0, 10).map(name).join('; ')}${items.length > 10 ? `; +${items.length - 10} more` : ''}`
 
   return [
-    ...(run.running > 0 ? ['Stop the run first (the console cannot: Claude Code\'s Workflows panel, or TaskStop), then:'] : []),
+    ...(run.running > 0 ? ['Stop the run first (the Control tab\'s Stop asks first and calls TaskStop with the run\'s task id: verified to stop the whole run on Claude Code 2.1.289; it cannot stop a single agent; Claude Code\'s Workflows panel also works), then:'] : []),
     `Workflow({ scriptPath: "<the script that started this run>", resumeFromRunId: "${run.id}" })`,
     ...(again.length > 0 ? [`runs again, no result recorded: ${list(again)}`] : []),
     ...(cached.length > 0 ? [`stays cached, its error is its recorded result: ${list(cached)}. Change that agent() call or its input to run it again`] : []),

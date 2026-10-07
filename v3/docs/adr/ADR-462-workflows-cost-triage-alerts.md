@@ -39,7 +39,7 @@ timeout event in the files, so `timeout` is a text match and the page says so. T
 and each failing row carries the first error line (masked, control characters stripped). The "re-run just the failed items" text is the
 documented `Workflow({ scriptPath, resumeFromRunId })` (ruflo-workflows: workflow-run: unchanged `agent()` calls return cached), split
 into agents that run again (no result recorded) and agents whose error *is* their recorded result and so stay cached. It is text for the
-person to run: the console never runs it, and says to stop a running run first because the console cannot stop or message a workflow.
+person to run: the console never runs it, and says to stop a running run first (amended by ADR-465 and 0.34.1: the Control tab's Stop asks first and calls TaskStop, which is unverified for a workflow run's own id, so the Workflows panel is named as the sure way).
 A ruflo swarm has no resume verb and is told so.
 
 **Guards** (`data/wf-alerts.ts`, pure). Options `wfBudgetRunUsd`, `wfBudgetDayUsd` (0 off, else 0.01 to 10000) and `wfAlertRules`

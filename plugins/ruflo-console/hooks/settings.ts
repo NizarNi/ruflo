@@ -9,6 +9,7 @@
  * exec read-only, the saved per-turn budget) and the reply streams in; nothing is changed by it.
  */
 import type { ActionSpec } from './actions'
+import { budgetAmount } from './cost'
 import { plain } from './data/parse'
 import { RUFLO_MARKET } from './data/snapshot'
 import { DEFAULT_LOOP, LOOP_INTERVALS, type LoopPrefs, WRITER_CAPS } from './goap'
@@ -80,6 +81,13 @@ export const LOOP_ROWS: readonly { id: string; title: string; description: strin
 ]
 export const AI_KEY = 'ai-prefs'
 
+/** A mission spend cap as stored: '' for none, else decimal dollars from 0.01 to 10000 with at most two places; null for anything else (a `0` is not "no cap" and is refused). */
+export const capText = (value: string): string | null => {
+  const text = value.trim()
+
+  return text === '' ? '' : /^\d{1,5}(\.\d{1,2})?$/.test(text) && budgetAmount(text) !== null ? text : null
+}
+
 export type SettingsState = {
   level: Level
   /** The plugin whose options are shown (bare name). */
@@ -90,6 +98,10 @@ export type SettingsState = {
   core: Map<string, string>
   coreLoading: boolean
   ai: AiPrefs
+  /** What the person saved for Claude's control; `ai.modelControl/modelConfirm` is this lowered by `cap`, and only this is ever stored (#3814). */
+  savedControl: Pick<AiPrefs, 'modelControl' | 'modelConfirm'>
+  /** This session's RUFLO_CONSOLE_CONTROL, which can only lower the saved level (ADR-450 T12); null when unset. */
+  cap: { level: AiPrefs['modelControl']; confirm: AiPrefs['modelConfirm'] } | null
   /** The active search (applied with Enter, shown as a chip, cleared with ✕). */
   query: string
   /** Only settings that differ from their default. */
@@ -104,7 +116,7 @@ export function settingsOf(state: State): SettingsState {
   let found = states.get(state)
 
   if (found === undefined) {
-    found = { level: 'simple', plugin: 'ruflo-console', configs: new Map(), loading: new Set(), core: new Map(), coreLoading: false, ai: { ...DEFAULT_AI }, query: '', onlyChanged: false, last: null }
+    found = { level: 'simple', plugin: 'ruflo-console', configs: new Map(), loading: new Set(), core: new Map(), coreLoading: false, ai: { ...DEFAULT_AI }, savedControl: { modelControl: DEFAULT_AI.modelControl, modelConfirm: DEFAULT_AI.modelConfirm }, cap: null, query: '', onlyChanged: false, last: null }
     states.set(state, found)
   }
 
@@ -284,6 +296,25 @@ export function askPrompt(title: string, description: string, current: string, w
   return `Explain the ruflo setting "${title}" (${where}): ${description} It is currently ${current === '' ? 'unset' : `"${current}"`}. What does each choice change, and what would you recommend for a developer working in this repository? Do not change anything.`
 }
 
+const CONTROL_ORDER: readonly AiPrefs['modelControl'][] = ['off', 'read', 'write', 'manage', 'full']
+
+/** The in-force control: what the person saved, lowered by the session cap (the lower level; ask if either asks). A saved "off" stays off. */
+function applyControl(settings: SettingsState): void {
+  const { savedControl, cap } = settings
+  const lower = cap !== null && CONTROL_ORDER.indexOf(cap.level) < CONTROL_ORDER.indexOf(savedControl.modelControl)
+
+  settings.ai.modelControl = lower && cap !== null ? cap.level : savedControl.modelControl
+  settings.ai.modelConfirm = cap?.confirm === 'ask' || savedControl.modelConfirm === 'ask' ? 'ask' : 'auto'
+}
+
+/** Sets this session's cap (null clears it) and applies it now; every later load and save applies it again, so nothing lifts it (#3814). */
+export function setControlCap(state: State, cap: SettingsState['cap']): void {
+  const settings = settingsOf(state)
+
+  settings.cap = cap
+  applyControl(settings)
+}
+
 /** Persists and loads the AI terminal's preferences (claude model, per-turn budget); a bad stored value is the default. */
 export async function loadAiPrefs(state: State, host: Host): Promise<void> {
   const stored = recordOf(await host.storeGet(AI_KEY).catch(() => undefined))
@@ -292,7 +323,9 @@ export async function loadAiPrefs(state: State, host: Host): Promise<void> {
 
   const flag = (key: keyof LoopPrefs, fallback: boolean) => (typeof stored?.[key] === 'boolean' ? (stored[key] as boolean) : fallback)
 
-  settingsOf(state).ai = {
+  const settings = settingsOf(state)
+
+  settings.ai = {
     claudeModel: model ?? DEFAULT_AI.claudeModel,
     budgetUsd: budget ?? DEFAULT_AI.budgetUsd,
     autoAccept: stored?.autoAccept === true,
@@ -302,7 +335,7 @@ export async function loadAiPrefs(state: State, host: Host): Promise<void> {
     modelConfirm: stored?.modelConfirm === 'auto' ? 'auto' : 'ask',
     missionContext: stored?.missionContext !== false,
     loopGates: typeof stored?.loopGates === 'string' ? stored.loopGates.slice(0, 800) : '',
-    missionCapUsd: typeof stored?.missionCapUsd === 'string' && /^\d{1,5}(\.\d{1,2})?$/.test(stored.missionCapUsd) ? stored.missionCapUsd : '',
+    missionCapUsd: typeof stored?.missionCapUsd === 'string' ? (capText(stored.missionCapUsd) ?? '') : '',
     loopInterval: LOOP_INTERVALS.find(item => item === stored?.loopInterval) ?? DEFAULT_LOOP.loopInterval,
     loopWorktrees: flag('loopWorktrees', DEFAULT_LOOP.loopWorktrees),
     loopCommit: flag('loopCommit', DEFAULT_LOOP.loopCommit),
@@ -311,13 +344,29 @@ export async function loadAiPrefs(state: State, host: Host): Promise<void> {
     loopPublish: stored?.loopPublish === true,
     loopWriters: WRITER_CAPS.find(item => item === stored?.loopWriters) ?? DEFAULT_LOOP.loopWriters,
   }
+  settings.savedControl = { modelControl: settings.ai.modelControl, modelConfirm: settings.ai.modelConfirm }
+  applyControl(settings)
 }
 
 export function saveAiPrefs(state: State, host: Host, patch: Partial<AiPrefs>): void {
   const settings = settingsOf(state)
 
+  // A cap outside 0.01 to 10000 is refused (the old one stays) and says so, rather than turning into "no cap" (#3818).
+  if (patch.missionCapUsd !== undefined) {
+    const cap = capText(patch.missionCapUsd)
+
+    if (cap === null) {
+      state.outcome = { label: 'set mission spend cap', ok: false, verified: 'n/a', detail: 'a cap is 0.01 to 10000 dollars (digits and at most two decimals); leave it empty for no cap. The old value is kept.', atMs: Date.now() }
+      patch = { ...patch }
+      delete patch.missionCapUsd
+    } else patch = { ...patch, missionCapUsd: cap }
+  }
+
+  // The person's own pick of the control level is the saved one; the session cap only shapes what is in force (#3814).
+  settings.savedControl = { modelControl: patch.modelControl ?? settings.savedControl.modelControl, modelConfirm: patch.modelConfirm ?? settings.savedControl.modelConfirm }
   settings.ai = { ...settings.ai, ...patch }
-  void host.storeSet(AI_KEY, settings.ai).catch(() => undefined)
+  applyControl(settings)
+  void host.storeSet(AI_KEY, { ...settings.ai, ...settings.savedControl }).catch(() => undefined)
   host.invalidate()
 }
 

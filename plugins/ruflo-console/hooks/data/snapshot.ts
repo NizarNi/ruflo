@@ -94,7 +94,7 @@ export type Snapshot = {
   readAtMs: number
 }
 
-export type ReadStatus = 'ok' | 'missing' | 'too-large' | 'refused'
+export type ReadStatus = 'ok' | 'missing' | 'too-large' | 'refused' | 'not-regular'
 
 const statusOf = (read: Read): ReadStatus => (read.text !== null ? 'ok' : read.reason)
 

@@ -10,6 +10,9 @@
  * Cases: transcript parse at 1 / 3 / 5 / 50 MB; the folder reader at 1 / 20 / 200 runs on disk (cold, refreshed unchanged, one agent grown)
  * and with 5 MB / 50 MB transcripts (tail reads); a whole refresh with the page open and closed; the page frame (what one draw costs)
  * at 1 / 20 / 200 runs and with the drill open; search across every parsed transcript; a replay step; a conversation thread fed 1000 messages.
+ * ADR-473 adds: 50 lines appended to a 3 MB / 5 MB / 50 MB transcript (the whole parse against the incremental one, with the answers compared), a 200-run
+ * refresh in which one 2.4 MB transcript grew, and the first draw of a typed search with a cold and with a warmed parse memo. The incremental cases
+ * need hooks/data/wf-incr*.ts and are skipped (printed as absent) where those do not exist, so the same script can be run on the code before.
  */
 import { newState } from '../hooks/state.ts'
 import { parseActivity } from '../hooks/data/wf-activity.ts'
@@ -29,6 +32,10 @@ import { resetSlots, slotsFor } from '../hooks/views/wf-slots.ts'
 import { registerDrill, setQuery } from '../hooks/views/wf-detail.ts'
 import { registerSearch } from '../hooks/views/wf-search.ts'
 import { sha256 } from '../hooks/data/ap-envelope.ts'
+import { parsedStats } from '../hooks/data/wf-drill-io.ts'
+
+/** The incremental parsers, where this tree has them. */
+const incr = await Promise.all([import('../hooks/data/wf-incr.ts'), import('../hooks/data/wf-incr-activity.ts')]).then(([a, b]) => ({ FactsIncr: a.FactsIncr, ActivityIncr: b.ActivityIncr })).catch(() => null)
 
 const QUICK = process.argv.includes('--quick')
 const CHECK = process.argv.includes('--check')
@@ -55,6 +62,14 @@ const BUDGET_MS = /** @type {Record<string, number>} */ ({
   'search: miss over 360 transcripts': 120,
   'search: hit': 120,
   'replay: boardAt, 2000 agents': 12,
+  // ADR-473: what one refresh may spend on a transcript that grew by 50 lines, whole file or tail window (one frame is ~16 ms).
+  'append 50 lines onto 3 MB, activity: incremental': 8,
+  'append 50 lines onto 3 MB, facts: incremental': 5,
+  'append 50 lines onto 5 MB (400 KB tail), activity: incremental': 8,
+  'append 50 lines onto 50 MB (400 KB tail), activity: incremental': 8,
+  'reader 200 runs, 2.4 MB transcripts: refresh, 50 lines appended to one': 40,
+  'search typed: first draw, project that fits (memo warmed)': 16,
+  'refresh: warm-up tick (cold memo), slowest of 100': 60,
 })
 const BUDGET_P99_MS = 16
 
@@ -210,7 +225,7 @@ function disk(/** @type {{ runs: number; heavy: number; agents: number; bytes: n
     readTail: async (/** @type {string} */ _path, /** @type {number} */ _bytes) => (fs.reads.tail++, tail),
   }
 
-  return { fs, files, grow: (/** @type {string} */ path) => { const held = files.get(path); if (held !== undefined) files.set(path, { text: `${held.text}${JSON.stringify({ type: 'user', message: { content: 'more' } })}\n`, mtimeMs: held.mtimeMs + 1000, size: held.size + 50 }) } }
+  return { fs, files, append: (/** @type {string} */ path, /** @type {string} */ more) => { const held = files.get(path); if (held !== undefined) files.set(path, { text: `${held.text}${more}`, mtimeMs: held.mtimeMs + 1000, size: held.size + more.length }) }, grow: (/** @type {string} */ path) => { const held = files.get(path); if (held !== undefined) files.set(path, { text: `${held.text}${JSON.stringify({ type: 'user', message: { content: 'more' } })}\n`, mtimeMs: held.mtimeMs + 1000, size: held.size + 50 }) } }
 }
 
 const summary = (/** @type {import('../hooks/data/workflows.ts').WfRun[]} */ runs) => runs.map(run => [run.id, run.state, run.total, run.done, run.running, run.totalTokens, run.phases.map(p => p.agents.map(a => [a.id, a.state, a.tokens, a.toolCalls, a.lastTool]))])
@@ -273,6 +288,114 @@ for (const mb of want('parse') ? (QUICK ? [1, 3, 5] : [1, 3, 5, 50]) : []) {
   bench(`parseActivity ${mb} MB`, () => { const p = parseActivity(text); return [p.entries.length, p.calls.length, p.dropped, p.files.length] }, runs)
 }
 
+// 1b. Append: 50 lines onto a transcript that already has megabytes (ADR-473). The reference (whole parse) and the incremental parse see the same texts in the same order.
+console.log('\n# append: 50 lines onto an existing transcript')
+
+/** @type {(name: string, times: number[], note: string) => void} */
+function seriesReport(name, times, note) {
+  times.sort((a, b) => a - b)
+
+  const median = times[Math.floor(times.length / 2)] ?? 0
+  const p99 = times[Math.min(times.length - 1, Math.floor(times.length * 0.99))] ?? 0
+  const budget = BUDGET_MS[name]
+  const over = budget !== undefined && (median > budget || p99 > Math.max(BUDGET_P99_MS, budget * 3))
+
+  if (over) failed.push(name + ': median ' + median.toFixed(3) + ' ms (budget ' + budget + '), p99 ' + p99.toFixed(3) + ' ms')
+
+  console.log(name.padEnd(64) + ' median ' + median.toFixed(3).padStart(9) + ' ms · p99 ' + p99.toFixed(3).padStart(9) + ' ms · ' + note + (over ? ' · OVER BUDGET' : ''))
+}
+
+/** 50 more lines in the shapes Claude Code writes, with ids no earlier batch used. */
+const batchOf = (/** @type {number} */ k) => transcriptOfBytes(30_000, 7000 + k).split('\n').slice(0, 50).join('\n') + '\n'
+const ROUNDS = 14
+
+for (const mb of want('append') ? (QUICK ? [3, 5] : [3, 5, 50]) : []) {
+  const base = transcriptOfBytes(mb * 1_000_000, 1)
+  const isTail = mb > 3
+  const batches = Array.from({ length: ROUNDS }, (_, k) => batchOf(k))
+  /** Each step's text: the whole file (3 MB, read whole) or its last 400 KB (read past the cap), flattened before timing. */
+  const whole = /** @type {string[]} */ ([])
+  let file = base
+
+  for (const batch of batches) {
+    file += batch
+    whole.push(isTail ? file.slice(file.length - TAIL_BYTES) : file.slice(0))
+    whole[whole.length - 1]?.charCodeAt(0)
+  }
+
+  const first = isTail ? base.slice(base.length - TAIL_BYTES) : base
+  const where = isTail ? mb + ' MB (400 KB tail)' : mb + ' MB'
+  const refA = whole.map((text, i) => ({ text, i }))
+
+  // The reference: what a refresh used to do for every changed transcript, the whole text (the window, for a tail).
+  const refAct = /** @type {unknown[]} */ ([])
+  const refFacts = /** @type {unknown[]} */ ([])
+  const tA = /** @type {number[]} */ ([])
+  const tF = /** @type {number[]} */ ([])
+
+  for (const { text } of refA) {
+    let t = process.hrtime.bigint()
+
+    refAct.push(parseActivity(text, isTail))
+    tA.push(ms(t))
+    t = process.hrtime.bigint()
+    refFacts.push(parseTranscript(text, isTail))
+    tF.push(ms(t))
+  }
+
+  seriesReport('append 50 lines onto ' + where + ', activity: whole parse', tA, 'parsed ' + (whole[0]?.length ?? 0) + ' chars each')
+  seriesReport('append 50 lines onto ' + where + ', facts: whole parse', tF, 'parsed ' + (whole[0]?.length ?? 0) + ' chars each')
+
+  if (incr === null) {
+    console.log('(incremental parsers not in this tree)')
+    continue
+  }
+
+  const act = new incr.ActivityIncr()
+  const facts = new incr.FactsIncr()
+  const iA = /** @type {number[]} */ ([])
+  const iF = /** @type {number[]} */ ([])
+  const fed = /** @type {number[]} */ ([])
+  const outA = /** @type {unknown[]} */ ([])
+  const outF = /** @type {unknown[]} */ ([])
+
+  act.update(first, isTail, '0')
+  facts.update(first, isTail, '0')
+
+  for (const [i, text] of whole.entries()) {
+    let t = process.hrtime.bigint()
+    const a = act.update(text, isTail, String(i + 1))
+
+    iA.push(ms(t))
+    fed.push(a.fed)
+    outA.push(a.value)
+    t = process.hrtime.bigint()
+    outF.push(facts.update(text, isTail, String(i + 1)).value)
+    iF.push(ms(t))
+  }
+
+  const fedMedian = [...fed].sort((a, b) => a - b)[Math.floor(fed.length / 2)] ?? 0
+  const sameA = isTail ? 'n/a (tail: compared once below)' : outA.every((v, i) => digest(v) === digest(refAct[i])) ? 'answers identical' : 'ANSWERS DIFFER'
+  const sameF = isTail ? 'n/a (tail: compared once below)' : outF.every((v, i) => digest(v) === digest(refFacts[i])) ? 'answers identical' : 'ANSWERS DIFFER'
+
+  if (sameA === 'ANSWERS DIFFER' || sameF === 'ANSWERS DIFFER') failed.push('append ' + where + ': incremental answer differs from the whole parse')
+
+  seriesReport('append 50 lines onto ' + where + ', activity: incremental', iA, 'parsed ' + fedMedian + ' chars · ' + sameA)
+  seriesReport('append 50 lines onto ' + where + ', facts: incremental', iF, sameF)
+
+  if (isTail) {
+    // A tail state carries the history of every window since it began, so it is compared with the whole parse of the file from its first complete line.
+    const from = base.indexOf('\n', base.length - TAIL_BYTES) + 1
+    const reference = parseActivity(file.slice(from), false)
+    const got = /** @type {import('../hooks/data/wf-activity.ts').Parsed} */ (outA.at(-1))
+    const same = digest({ ...reference, isTail: true }) === digest(got)
+
+    console.log(''.padEnd(64) + ' tail state vs whole parse of the file from its anchor: ' + (same ? 'identical' : 'DIFFER'))
+
+    if (!same) failed.push('append ' + where + ': the tail state differs from the whole parse from its anchor')
+  }
+}
+
 // 2. The folder reader.
 console.log('\n# folder reader (6 runs read, however many are on disk)')
 
@@ -290,6 +413,28 @@ for (const runs of want('reader') ? [1, 20, 200] : []) {
   const victim = `${ROOT}/${SESSION}/subagents/workflows/wf_r000/agent-a0.jsonl`
 
   await benchAsync(`reader ${runs} runs: refresh, one agent grew`, async () => { d.grow(victim); return summary((await read()).runs) }, 12, () => 'n/a (grows)')
+}
+
+if (want('reader') && !QUICK) {
+  // 200 runs on disk, the newest 6 with 8 transcripts of 2.4 MB (read whole): a refresh in which one of them grew by 50 lines.
+  const d = disk({ runs: 200, heavy: 6, agents: 8, bytes: 2_400_000 })
+  const cache = new Map()
+  const opts = { configDir: CONFIG, cwd: CWD, nowMs: NOW }
+  const read = () => readWorkflowRuns(/** @type {never} */ (d.fs), cache, opts)
+  const victim = ROOT + '/' + SESSION + '/subagents/workflows/wf_r000/agent-a0.jsonl'
+  let k = 0
+
+  const start = process.hrtime.bigint()
+
+  await read()
+  console.log('reader 200 runs, 2.4 MB transcripts: first read (cold)'.padEnd(46) + ' ' + ms(start).toFixed(1).padStart(10) + ' ms')
+  // The first refreshes after a page opens also parse ahead for the drill and its search (a small allowance each); measure once that has settled.
+  const settle = process.hrtime.bigint()
+
+  for (let i = 0; i < 70; i++) await read()
+  console.log('reader 200 runs, 2.4 MB transcripts: 70 refreshes to settle'.padEnd(46) + ' ' + ms(settle).toFixed(1).padStart(10) + ' ms in all')
+  await benchAsync('reader 200 runs, 2.4 MB transcripts: refresh, unchanged', async () => summary((await read()).runs), 12)
+  await benchAsync('reader 200 runs, 2.4 MB transcripts: refresh, 50 lines appended to one', async () => { d.append(victim, batchOf(100 + k++)); return summary((await read()).runs) }, 12, () => 'n/a (grows)')
 }
 
 console.log('\n# folder reader, transcripts over the read cap (tail reads)')
@@ -318,6 +463,8 @@ if (want('refresh')) {
   const world = await worldOf(d)
   const { state, host } = world
   let t = NOW
+
+  for (let i = 0; i < 40; i++) await refreshWorkflows(state, host, true, (t += 1000))
 
   await benchAsync('refresh: page open, nothing changed', async () => { await refreshWorkflows(state, host, true, (t += 1000)); return summary(state.wf.read?.runs ?? []) }, 12)
 
@@ -389,13 +536,92 @@ if (want('drill')) {
   console.log(`${' '.repeat(46)} agent transcript: ${parsed?.entries.length ?? 0} entries kept (${parsed?.dropped ?? 0} older dropped)`)
   bench('frame: page, drill open on an agent', () => countOf(frame.tree()), ITERS || 40, out => String(out))
 
-  // A query typed in the search box: every frame asks for the search of all 360 transcripts. The first draw parses them; after it, a frame must not.
+  // A query typed in the search box: every frame asks for the search of all 360 transcripts. The first draw parses them (the memo is empty: a person typed
+  // before any refresh parsed ahead); after it, a frame must not. Then the same with the memo warmed by 100 refresh ticks (5 minutes of a page left open at the 3 s refresh).
+  const rebind = () => {
+    resetDrillIo()
+    bindDrill(world.state, /** @type {never} */ ({ fs: world.host.fs, run: world.host.run, invalidate: noop }))
+  }
+
+  rebind()
+
   const typed = process.hrtime.bigint()
 
   setQuery(envNow(), 'module_7')
   countOf(frame.tree())
-  console.log(`${'search typed: first draw (parses all)'.padEnd(46)} ${ms(typed).toFixed(1).padStart(10)} ms`)
+  console.log(String('search typed: first draw (cold memo)').padEnd(46) + ' ' + ms(typed).toFixed(1).padStart(10) + ' ms · parses ' + parsedStats().parses + ' · chars held ' + parsedStats().chars)
   bench('frame: page, search query active', () => countOf(frame.tree()), ITERS || 40, out => String(out))
+  rebind()
+
+  const ticks = /** @type {number[]} */ ([])
+
+  for (let i = 0; i < 100; i++) {
+    const t = process.hrtime.bigint()
+
+    await refreshWorkflows(world.state, world.host, true, NOW)
+    ticks.push(ms(t))
+  }
+
+  ticks.sort((x, y) => x - y)
+  seriesReport('refresh: warm-up tick (cold memo), slowest of 100', [ticks.at(-1) ?? 0], 'median tick ' + (ticks[50] ?? 0).toFixed(1) + ' ms · parsed ahead: ' + JSON.stringify({ warmed: parsedStats().warmed, held: parsedStats().chars }))
+
+  const warm = process.hrtime.bigint()
+  const before = parsedStats().parses
+
+  setQuery(envNow(), 'module_8')
+  countOf(frame.tree())
+  console.log(String('search typed: first draw (memo warmed by 100 refreshes)').padEnd(64) + ' ' + ms(warm).toFixed(1).padStart(9) + ' ms · parses on the frame: ' + (parsedStats().parses - before) + ' (the search scans more than the 24 M memo holds)')
+}
+
+// 4b. A project whose search fits the parse memo (6 runs x 20 agents x 100 KB = 12 M characters, under its 24 M): the first draw after typing, cold and warmed (ADR-473).
+console.log('\n# typed search on a project that fits the memo')
+
+if (want('typed')) {
+  resetSlots()
+  resetDrillIo()
+  registerDrill()
+  registerSearch()
+
+  const world = await worldOf(disk({ runs: 6, heavy: 6, agents: 20, bytes: 100_000 }))
+  const frame = frameOf(world)
+  const envNow = () => {
+    const m = workflowsModelOf(world.state, NOW)
+    const h = pick(world.state.wf.ui, m?.runs ?? [])
+
+    return /** @type {never} */ ({ ctx: frame.ctx, runs: m?.runs ?? [], run: h.run, phase: h.phase, agent: h.agent, ui: h.ui, nowMs: NOW })
+  }
+  const typeOnce = (/** @type {string} */ query) => {
+    const t = process.hrtime.bigint()
+    const before = parsedStats().parses
+
+    setQuery(envNow(), query)
+    countOf(frame.tree())
+
+    return { ms: ms(t), parses: parsedStats().parses - before }
+  }
+
+  resetDrillIo()
+
+  const cold = typeOnce('module_7')
+
+  console.log('search typed: first draw, project that fits (cold memo)'.padEnd(64) + ' ' + cold.ms.toFixed(1).padStart(9) + ' ms · parses ' + cold.parses)
+  resetDrillIo()
+
+  const ticks = /** @type {number[]} */ ([])
+
+  for (let i = 0; i < 40; i++) {
+    const t = process.hrtime.bigint()
+
+    await refreshWorkflows(world.state, world.host, true, NOW)
+    ticks.push(ms(t))
+  }
+
+  ticks.sort((x, y) => x - y)
+  console.log(''.padEnd(64) + ' warm-up: 40 refresh ticks, median ' + (ticks[20] ?? 0).toFixed(1) + ' ms, slowest ' + (ticks.at(-1) ?? 0).toFixed(1) + ' ms · held ' + parsedStats().chars + ' chars')
+
+  const warm = typeOnce('module_8')
+
+  seriesReport('search typed: first draw, project that fits (memo warmed)', [warm.ms], 'parses on the frame: ' + warm.parses)
 }
 
 // 5. Search over every parsed transcript.

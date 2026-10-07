@@ -11,7 +11,8 @@
  * A refusal, a missing file or a file too large is a stated reason, never an empty success.
  */
 import { readBounded, type ReadCache } from './files'
-import { cleanLine, cleanPath, journalResult, parseActivity, type Capped, type Parsed } from './wf-activity'
+import { cleanLine, cleanPath, journalResult, type Capped, type Parsed } from './wf-activity'
+import { activityOf, parsedStats, PARSED_BUDGET_CHARS, resetStore } from './wf-incr-store'
 import { TAIL_BYTES, TRANSCRIPT_CAP, type WorkflowFs } from './workflows-read'
 import type { WfAgent, WfRun } from './workflows'
 
@@ -36,9 +37,7 @@ export const isBound = (): boolean => bound !== null
 /** For tests: forgets the binding and everything held. */
 export function resetDrillIo(): void {
   bound = null
-  parsedMemo.clear()
-  parsedChars = 0
-  parseCount = 0
+  resetStore()
   tails.clear()
   notes.clear()
   results.clear()
@@ -74,40 +73,16 @@ const hold = <V>(map: Map<string, V>, key: string, value: V, max = MAX_HELD): vo
 
 export const noteOf = (key: string): Note | undefined => notes.get(key)
 
-const parsedMemo = new Map<string, { src: string; isTail: boolean; parsed: Parsed }>()
 /**
- * The parse memo is bounded by the text it holds, not by a count of files: a live project has 6 runs x 60 agents, and a memo of 24 entries was
- * walked past by every frame that asked for all of them (the search panel does), so each draw parsed ~340 transcripts again (bench-workflows.mjs:
- * 66 ms a frame). A parsed transcript is no bigger than its text, so this budget caps what the memo can keep; the oldest go first.
+ * The parse memo is bounded by the text it holds, not by a count of files (data/wf-incr-store.ts): a live project has 6 runs x 60 agents, and a memo
+ * of 24 entries was walked past by every frame that asked for all of them (the search panel does), so each draw parsed ~340 transcripts again
+ * (bench-workflows.mjs: 66 ms a frame). A transcript that grew is parsed from where its last parse ended, not from its first line (ADR-473).
  */
-export const PARSED_BUDGET_CHARS = 24_000_000
-const PARSED_MAX_ENTRIES = 1024
-let parsedChars = 0
-let parseCount = 0
+export { parsedStats, PARSED_BUDGET_CHARS }
 
-/** What the parse memo holds and how many parses it has done: what a test or a bench reads to prove a frame parsed nothing. */
-export const parsedStats = (): { entries: number; chars: number; parses: number } => ({ entries: parsedMemo.size, chars: parsedChars, parses: parseCount })
+const tails = new Map<string, { text: string; size: number; tag: string }>()
 
-function holdParsed(path: string, entry: { src: string; isTail: boolean; parsed: Parsed }): void {
-  const old = parsedMemo.get(path)
-
-  if (old !== undefined) parsedChars -= old.src.length
-
-  parsedMemo.delete(path)
-  parsedMemo.set(path, entry)
-  parsedChars += entry.src.length
-
-  for (const [key, held] of parsedMemo) {
-    if (key === path || (parsedChars <= PARSED_BUDGET_CHARS && parsedMemo.size <= PARSED_MAX_ENTRIES)) break
-
-    parsedMemo.delete(key)
-    parsedChars -= held.src.length
-  }
-}
-
-const tails = new Map<string, { text: string; size: number }>()
-
-export type Text = { text: string; isTail: boolean }
+export type Text = { text: string; isTail: boolean; /** Which version of the file a tail is (size and mtime): two windows can read the same at different places. */ tag: string }
 
 /** The transcript text in memory for an agent: the console's read cache (whole files, handed in by the caller), else a tail this module read; null where neither has it. */
 export function textOf(cache: ReadCache, agent: WfAgent): Text | null {
@@ -117,31 +92,21 @@ export function textOf(cache: ReadCache, agent: WfAgent): Text | null {
 
   const held = cache.get(path)
 
-  if (held !== undefined && 'text' in held) return { text: held.text, isTail: false }
+  if (held !== undefined && 'text' in held) return { text: held.text, isTail: false, tag: '' }
 
   const tail = tails.get(path)
 
-  return tail === undefined ? null : { text: tail.text, isTail: true }
+  return tail === undefined ? null : { text: tail.text, isTail: true, tag: tail.tag }
 }
 
-/** The agent's transcript parsed, memoised by the text itself so an unchanged file is parsed once however often the page draws. */
+/** The agent's transcript parsed, memoised by the text itself so an unchanged file is parsed once however often the page draws, and a grown one only from its new lines. */
 export function parsedOf(cache: ReadCache, agent: WfAgent): Parsed | null {
   const text = textOf(cache, agent)
   const path = agent.transcriptPath
 
   if (text === null || path === undefined) return null
 
-  const held = parsedMemo.get(path)
-
-  if (held !== undefined && held.isTail === text.isTail && held.src === text.text) return held.parsed
-
-  const parsed = parseActivity(text.text, text.isTail)
-
-  parseCount += 1
-
-  holdParsed(path, { src: text.text, isTail: text.isTail, parsed })
-
-  return parsed
+  return activityOf(path, text.text, text.isTail, text.tag)
 }
 
 /** Reads one agent's transcript into memory. Resolves when done; never rejects. */
@@ -168,7 +133,7 @@ export async function loadTranscript(agent: WfAgent): Promise<void> {
     else if (read.reason === 'too-large' && b.host.fs.readTail !== undefined) {
       const tail = await b.host.fs.readTail(path, TAIL_BYTES)
 
-      hold(tails, path, { text: tail, size: read.size ?? 0 })
+      hold(tails, path, { text: tail, size: read.size ?? 0, tag: `${read.size ?? 0}` })
       notes.set(path, { phase: 'ok', why: `${(read.size ?? 0) / 1_000_000 >= 0.1 ? `${((read.size ?? 0) / 1_000_000).toFixed(1)} MB` : 'a large file'}: only the last ${Math.round(TAIL_BYTES / 1000)} KB is read` })
     } else notes.set(path, { phase: 'failed', why: read.reason === 'too-large' ? `${((read.size ?? 0) / 1_000_000).toFixed(1)} MB is over the ${(TRANSCRIPT_CAP / 1_000_000).toFixed(1)} MB read cap and this host cannot read a tail` : read.reason === 'missing' ? 'the file is gone' : 'the host refused the read' })
   } catch (error) {
@@ -211,7 +176,10 @@ export async function reloadTails(): Promise<void> {
     if (!isRunFile(path, b.configDir)) continue
 
     try {
-      hold(tails, path, { text: await b.host.fs.readTail(path, TAIL_BYTES), size: held.size })
+      const stat = await b.host.fs.stat(path).catch(() => undefined)
+      const size = stat?.size ?? held.size
+
+      hold(tails, path, { text: await b.host.fs.readTail(path, TAIL_BYTES), size, tag: `${size}:${stat?.mtimeMs ?? 0}` })
     } catch {
       // The held tail stays; the next tick tries again.
     }

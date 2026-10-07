@@ -12,31 +12,28 @@ import { activeOf, apTick, appendEvents, clearKill, drainNotices, hostOf, pauseN
 import { DEFAULTS, tierOf, tunablesFrom, verifyReceipts } from '../data/ap-adapt'
 import { AUTOPILOT_DIR, hashOf, HARD_DENIES, MAX_DURATION_MS, MIN_DURATION_MS, seal, TOOL_CLASSES, validateEnvelope, widened, type Envelope, type ToolClass } from '../data/ap-envelope'
 import { anatoleFact } from '../data/ap-guard'
+import { SPEND_BASIS, spendSource } from '../data/ap-spend'
 import { bandText, summarize } from '../data/ap-loop'
 import { cleanText } from '../data/wf-clean'
 import { readBounded, under } from '../data/files'
 import type { NoticeDraft } from '../notices'
 import type { State } from '../state'
 import { ago, button, clip, kv, row, text, THEME, type Ctx } from './common'
+import { draftOf, defaultDraft, spanText, type DraftState } from './ap-draft'
+import { editorLists } from './ap-editor'
+import './ap-band'
 import './ap-parked'
 import { registerSlot, type SlotEnv } from './wf-slots'
 
+export { defaultDraft, draftOf }
+const START_WHY = 'the envelope draft is not valid, or nothing changed since the running one, or autopilot is not wired into this console'
 export const DRAFT_FILE = `${AUTOPILOT_DIR}/envelope.draft.json`
 const DAY = 86_400_000
 
-type Draft = { value: Record<string, unknown>; fromFile: string | null }
-
-const drafts = new WeakMap<State, Draft>()
-
-/** The first envelope offered: the project only, read/edit/test/local git, no network, no secrets, modest ceilings, a week. */
-export const defaultDraft = (cwd: string): Record<string, unknown> => ({ name: 'autopilot', toolClasses: ['read', 'edit', 'test', 'git-local'], paths: [cwd.replace(/\/+$/, '')], repos: [], network: [], secretEnv: [], spend: { hourUsd: 2, dayUsd: 10, totalUsd: 40 }, concurrency: 1, maxDurationMs: 7 * DAY, verify: [], acceptWithoutAnatole: false })
-
-export const draftOf = (state: State): Draft => drafts.get(state) ?? drafts.set(state, { value: defaultDraft(state.cwd), fromFile: null }).get(state)!
-
-const spendOf = (d: Draft): Record<string, number> => ({ ...(d.value.spend as Record<string, number>) })
+const spendOf = (d: DraftState): Record<string, number> => ({ ...(d.value.spend as Record<string, number>) })
 
 /** One edit of the draft by the editor's buttons. Pure on the draft object it is given. */
-export function editDraft(d: Draft, edit: { kind: 'class'; cls: ToolClass } | { kind: 'spend'; key: 'hourUsd' | 'dayUsd' | 'totalUsd'; by: 1 | -1 } | { kind: 'concurrency'; by: 1 | -1 } | { kind: 'days'; by: 1 | -1 } | { kind: 'anatole' }): void {
+export function editDraft(d: DraftState, edit: { kind: 'class'; cls: ToolClass } | { kind: 'spend'; key: 'hourUsd' | 'dayUsd' | 'totalUsd'; by: 1 | -1 } | { kind: 'concurrency'; by: 1 | -1 } | { kind: 'days'; by: 1 | -1 } | { kind: 'anatole' }): void {
   const v = d.value
 
   if (edit.kind === 'class') {
@@ -83,6 +80,7 @@ export async function loadDraftFile(state: State): Promise<string> {
 
   d.value = JSON.parse(JSON.stringify(checked.envelope)) as Record<string, unknown>
   d.fromFile = DRAFT_FILE
+  d.refused = null
   host.invalidate()
 
   return 'draft loaded'
@@ -100,10 +98,14 @@ function gates(ctx: Ctx, env: Envelope | null): RenderElement[] {
   const classes = Object.entries(store.preflight)
   const denied = classes.filter(([, v]) => v === 'deny' || v === 'ask').map(([k]) => k)
 
+  const source = spendSource(ctx.state)
+  const why = store.spendWhy ?? (source.kind === 'unavailable' ? source.why : null)
+
   return [
     kv(ctx, 'Anatole', anatole === 'on' ? 'on' : anatole === 'off' ? 'OFF: autopilot pauses' : 'not installed', anatole === 'on' ? THEME.ok : THEME.warn),
-    kv(ctx, 'permissions', !store.hasCheck ? 'preflight not wired: the engine still decides every call, never bypassed' : denied.length === 0 ? 'your settings allow every class' : `would ask or deny: ${denied.join(', ')} (parked)`, store.hasCheck ? undefined : THEME.warn),
-    kv(ctx, 'spend', `hour ${money(store.spend?.hourUsd)}/${money(env?.spend.hourUsd)} · day ${money(store.spend?.dayUsd)}/${money(env?.spend.dayUsd)} · total ${money(store.spend?.totalUsd)}/${money(env?.spend.totalUsd)}${store.spend === null ? ' (ledger not read)' : ' (list-price estimate, whole project)'}`),
+    kv(ctx, 'permissions', !store.hasCheck ? 'preflight not wired: the engine still decides every call, never bypassed' : classes.length === 0 ? 'not checked yet (the first pass asks the engine)' : denied.length === 0 ? 'your settings allow every class' : `would ask or deny: ${denied.join(', ')} (parked)`, store.hasCheck ? undefined : THEME.warn),
+    kv(ctx, 'spend', `hour ${money(store.spend?.hourUsd)}/${money(env?.spend.hourUsd)} · day ${money(store.spend?.dayUsd)}/${money(env?.spend.dayUsd)} · total ${money(store.spend?.totalUsd)}/${money(env?.spend.totalUsd)}${store.spend === null ? ` (ledger not read${why === null ? '' : `: ${cleanText(why)}`}; nothing starts until it is)` : ' (estimate, see below)'}`),
+    ...(store.spend === null ? [] : [text(ctx, ` ${SPEND_BASIS}`, { dimColor: true })]),
     kv(ctx, 'journal', `${Math.round(store.journalBytes / 1000)} kB of 1500 kB cap${store.badLines > 0 ? ` · ${store.badLines} unusable lines` : ''}`),
   ]
 }
@@ -117,7 +119,7 @@ function envelopeRows(ctx: Ctx, nowMs: number): RenderElement[] {
 
   return [
     text(ctx, ` "${cleanText(e.name)}" revision ${store.sealed.revision} · hash ${store.sealed.hash.slice(0, 12)} · approved ${ago(store.sealed.approvedAtMs, nowMs)}`),
-    text(ctx, ` classes ${e.toolClasses.join(' ') || 'none'} · up to ${e.concurrency} at once · ${Math.round(e.maxDurationMs / DAY)} d · ${e.verify.length} verify command${e.verify.length === 1 ? '' : 's'}`, { dimColor: true }),
+    text(ctx, ` classes ${e.toolClasses.join(' ') || 'none'} · up to ${e.concurrency} at once · ${spanText(e.maxDurationMs)} · ${e.verify.length} verify command${e.verify.length === 1 ? '' : 's'}`, { dimColor: true }),
     text(ctx, ` folders ${e.paths.map(cleanText).join(', ')}`, { dimColor: true }),
     text(ctx, ` network ${e.network.join(',') || 'none'} · repos ${e.repos.join(',') || 'none'} · secret names ${e.secretEnv.join(',') || 'none'}`, { dimColor: true }),
     text(ctx, ' checked against what a task SAYS: its class, paths, URLs and repos', { dimColor: true }),
@@ -144,10 +146,12 @@ function editor(ctx: Ctx): RenderElement[] {
 
   for (const key of ['hourUsd', 'dayUsd', 'totalUsd'] as const) rows.push(row(ctx, [text(ctx, ` ${key.replace('Usd', '').padEnd(8)}   `, { dimColor: true }), button(ctx, `ap-s-${key}-less`, ' − ', set({ kind: 'spend', key, by: -1 })), text(ctx, ` ${money(spend[key])} `, { bold: true }), button(ctx, `ap-s-${key}-more`, ' + ', set({ kind: 'spend', key, by: 1 }))], `ap-spend-${key}`))
 
-  rows.push(row(ctx, [text(ctx, ' at once    ', { dimColor: true }), button(ctx, 'ap-n-less', ' − ', set({ kind: 'concurrency', by: -1 })), text(ctx, ` ${String(d.value.concurrency)} `, { bold: true }), button(ctx, 'ap-n-more', ' + ', set({ kind: 'concurrency', by: 1 })), text(ctx, '   duration ', { dimColor: true }), button(ctx, 'ap-d-less', ' − ', set({ kind: 'days', by: -1 })), text(ctx, ` ${Math.round(Number(d.value.maxDurationMs) / DAY)} d `, { bold: true }), button(ctx, 'ap-d-more', ' + ', set({ kind: 'days', by: 1 }))], 'ap-conc'))
+  rows.push(row(ctx, [text(ctx, ' at once    ', { dimColor: true }), button(ctx, 'ap-n-less', ' − ', set({ kind: 'concurrency', by: -1 })), text(ctx, ` ${String(d.value.concurrency)} `, { bold: true }), button(ctx, 'ap-n-more', ' + ', set({ kind: 'concurrency', by: 1 })), text(ctx, '   duration ', { dimColor: true }), button(ctx, 'ap-d-less', ' − ', set({ kind: 'days', by: -1 })), text(ctx, ` ${spanText(Number(d.value.maxDurationMs))} `, { bold: true }), button(ctx, 'ap-d-more', ' + ', set({ kind: 'days', by: 1 }))], 'ap-conc'))
   rows.push(flow(ctx, [button(ctx, 'ap-anatole', `${d.value.acceptWithoutAnatole === true ? '●' : '○'} accept running without Anatole`, set({ kind: 'anatole' })), button(ctx, 'ap-load', 'load draft file', () => void loadDraftFile(ctx.state))], 'ap-draft-row'))
-  rows.push(text(ctx, ` ${DRAFT_FILE} holds paths, repos, network, verify`, { dimColor: true }))
+  rows.push(text(ctx, ` ${DRAFT_FILE} can load all the lists in one go`, { dimColor: true }))
   rows.push(text(ctx, checked.ok ? ` draft is valid · hash ${hashOf(checked.envelope).slice(0, 12)}${d.fromFile === null ? '' : ' · from file'} · ${(d.value.paths as string[]).join(', ')}` : ` draft is not valid: ${cleanText(checked.errors.slice(0, 2).join('; '))}`, { color: checked.ok ? undefined : THEME.bad }))
+
+  rows.push(...editorLists(ctx, d, storeOf(ctx.state).sealed?.envelope ?? null))
 
   return rows
 }
@@ -182,14 +186,16 @@ export function boardRows(env: SlotEnv): RenderElement[] {
   rows.push(text(ctx, ` ${sum.phase}${sum.reason === null ? '' : `: ${cleanText(sum.reason)}`} · ${store.status} · ${sum.running} running · ${sum.done} done (${sum.unverified} unverified) · ${sum.failed} failed${store.readAtMs > 0 ? ` · read ${ago(store.readAtMs, nowMs)}` : ''}`, { dimColor: true }))
   if (store.error !== null) rows.push(text(ctx, ` ${cleanText(store.error)}`, { color: THEME.warn }))
 
-  // Stop's key (9) is the key slot's: a second button on the same key would run it twice.
+  // Stop has no hotkey: the digits and letters are views' keys (a hotkey here would open another page). The button and /ruflo autopilot stop are the ways.
   rows.push(flow(ctx, [
-    button(ctx, 'ap-stop', 'Stop (9)', () => void stopNow(ctx.state, host)),
+    // Start lives here too: the page draws its action row only when a workflow run is selected, and a project with no run (a plain scratch repo) would have no way to start.
+    button(ctx, 'ap-start-btn', 'Start autopilot', () => ctx.act.workflows.ask(startSpec(env), START_WHY), { primary: true }),
+    button(ctx, 'ap-stop', 'Stop', () => void stopNow(ctx.state, host)),
     ...(sum.phase === 'running' ? [button(ctx, 'ap-pause', 'Pause', () => void pauseNow(ctx.state, host))] : []),
     ...(sum.phase === 'paused' ? [button(ctx, 'ap-resume', 'Resume', () => void resumeNow(ctx.state, host), { primary: true })] : []),
     button(ctx, 'ap-tick', 'Check now', () => void apTick(ctx.state, host)),
   ], 'ap-controls'))
-  rows.push(text(ctx, ' Start is the action row (key 8) and asks first · Stop asks nothing', { dimColor: true }))
+  rows.push(text(ctx, ' Start asks first (the card lists every command) · Stop asks nothing, and so does /ruflo autopilot stop', { dimColor: true }))
 
   rows.push(...gates(ctx, e), ...envelopeRows(ctx, nowMs), ...adaptRows(ctx, e))
   rows.push(text(ctx, ' next envelope (a change asks again):', { dimColor: true }), ...editor(ctx))
@@ -219,7 +225,7 @@ export function startSpec(env: SlotEnv): ActionSpec | null {
   const anatole = anatoleFact(state.snapshot?.anatole)
 
   return {
-    label: `start autopilot "${next.name}" (${next.toolClasses.join(' ')} · up to ${money(next.spend.totalUsd)} · ${Math.round(next.maxDurationMs / DAY)} d)`,
+    label: `start autopilot "${next.name}" (${next.toolClasses.join(' ')} · up to ${money(next.spend.totalUsd)} · ${spanText(next.maxDurationMs)})`,
     scope: 'workflows',
     args: [],
     declared: 'spend',
@@ -269,13 +275,8 @@ export function startSpec(env: SlotEnv): ActionSpec | null {
 /** Registers this module's slots; a repeat is refused harmlessly. */
 export function registerAutopilotSlots(): void {
   registerSlot({ kind: 'board', id: 'autopilot', title: 'Mission autopilot', order: 5, render: boardRows })
-  registerSlot({ kind: 'key', id: 'ap-stop-key', key: '9', label: 'autopilot stop', run: env => {
-      const host = hostOf(env.ctx.state)
-
-      if (host !== undefined) void stopNow(env.ctx.state, host)
-    },
-  })
-  registerSlot({ kind: 'action', id: 'ap-start', label: 'start autopilot', hotkey: '8', why: 'the envelope draft is not valid, or nothing changed since the running one, or autopilot is not wired into this console', spec: startSpec })
+  // No hotkeys (ADR-470 live finding): every digit and letter is a view's key or the page's own, and a slot hotkey that equals a view key loses to it (8 opened MetaHarness, 9 opened Memory, so the advertised Stop key never ran). Stop is a button and /ruflo autopilot stop.
+  registerSlot({ kind: 'action', id: 'ap-start', label: 'start autopilot', why: START_WHY, spec: startSpec })
   registerSlot({
     kind: 'notice',
     id: 'autopilot',

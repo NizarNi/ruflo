@@ -264,8 +264,11 @@ export function tick(s: LoopState, f: Facts): Decision {
       events.push({ t: 'step.failed', at: now, id: step.id, why: 'timed out' })
       failures += 1
       lastFailure = now
-    } else if (f.orphans.has(step.id) && effect === 'absent') {
+    } else if (f.orphans.has(step.id) && (effect === 'absent' || effect === 'unknown')) {
+      // A step from before a restart whose task the store still shows in progress (or not at all): nobody is working it, and waiting out its 30 minute deadline would then RETRY it without a question (found in the live run). Settle it now; a lost step parks its task (see `wasLost`).
       events.push({ t: 'step.failed', at: now, id: step.id, why: 'lost on restart: no effect found' })
+      // The store still shows it in progress, so the picker will never offer this task again: park it here, with a question that says what to do.
+      if (effect === 'unknown') events.push({ t: 'parked', at: now, id: parkId(step.task, 'lost'), task: step.task, question: 'a step for this task was in flight when the console restarted, and the task store still shows it in progress with nobody working it. It may have run: check the work, set the task back to pending to retry it (then approve once), or deny.' })
       failures += 1
       lastFailure = now
     } else stillOpen += 1

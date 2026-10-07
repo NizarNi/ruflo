@@ -14,6 +14,7 @@ import { estimate, hasMasked, missingOf, promptOf, templateById, TEMPLATES, valu
 import type { Host } from '../host'
 import type { State } from '../state'
 import { button, clip, row, text, THEME, type Ctx } from './common'
+import { flow } from './wf-layout'
 import { registerSlot, type SlotEnv } from './wf-slots'
 
 type Draft = { selected: string; raw: Record<string, Record<string, string | number>> }
@@ -45,7 +46,7 @@ export function cycleTemplate(state: State): void {
   hosts.get(state)?.invalidate()
 }
 
-function paramRow(ctx: Ctx, template: Template, param: Param, current: string | number): RenderElement {
+function paramRow(ctx: Ctx, template: Template, param: Param, current: string | number): RenderElement[] {
   const { state } = ctx
   const host = hosts.get(state)
   const key = `wft-${template.id}-${param.id}`
@@ -53,14 +54,14 @@ function paramRow(ctx: Ctx, template: Template, param: Param, current: string | 
   if (param.kind === 'int') {
     const n = Number(current)
 
-    return row(ctx, [text(ctx, ` ${param.label.padEnd(14)}`, { dimColor: true }), button(ctx, `${key}-less`, ' − ', () => setValue(state, host, template, param.id, Math.max(param.min, n - 1))), text(ctx, ` ${n} `, { bold: true }), button(ctx, `${key}-more`, ' + ', () => setValue(state, host, template, param.id, Math.min(param.max, n + 1))), text(ctx, ` (${param.min} to ${param.max})`, { dimColor: true })], key)
+    return [row(ctx, [text(ctx, ` ${param.label.padEnd(14)}`, { dimColor: true }), button(ctx, `${key}-less`, ' − ', () => setValue(state, host, template, param.id, Math.max(param.min, n - 1))), text(ctx, ` ${n} `, { bold: true }), button(ctx, `${key}-more`, ' + ', () => setValue(state, host, template, param.id, Math.min(param.max, n + 1))), text(ctx, ` (${param.min} to ${param.max})`, { dimColor: true })], key)]
   }
 
-  if (param.kind === 'choice') return row(ctx, [text(ctx, ` ${param.label.padEnd(14)}`, { dimColor: true }), ...param.choices.map(choice => button(ctx, `${key}-${choice}`, `${choice === current ? '●' : '○'} ${choice}`, () => setValue(state, host, template, param.id, choice)))], key)
+  if (param.kind === 'choice') return flow(ctx, param.choices.map(choice => ({ key: `${key}-${choice}`, label: `${choice === current ? '●' : '○'} ${choice}`, onPress: () => setValue(state, host, template, param.id, choice) })), key, ` ${param.label.padEnd(14)}`)
 
-  return ctx.kit.Input === undefined
+  return [ctx.kit.Input === undefined
     ? text(ctx, ` ${param.label}: this surface has no text field, so the default is used: ${param.fallback === '' ? 'none (required)' : param.fallback}`, { dimColor: true })
-    : ctx.kit.Input({ key, label: param.label, value: String(current), placeholder: `${param.hint}${param.fallback === '' ? ' (required)' : ''}`, onInput: value => setValue(state, host, template, param.id, value.slice(0, TEXT_MAX)), submitLabel: 'set', onSubmit: value => setValue(state, host, template, param.id, value.slice(0, TEXT_MAX)) })
+    : ctx.kit.Input({ key, label: param.label, value: String(current), placeholder: `${param.hint}${param.fallback === '' ? ' (required)' : ''}`, onInput: value => setValue(state, host, template, param.id, value.slice(0, TEXT_MAX)), submitLabel: 'set', onSubmit: value => setValue(state, host, template, param.id, value.slice(0, TEXT_MAX)) })]
 }
 
 export function boardRows(env: SlotEnv): RenderElement[] {
@@ -72,9 +73,9 @@ export function boardRows(env: SlotEnv): RenderElement[] {
   const missing = missingOf(template, values)
 
   return [
-    row(ctx, [text(ctx, ' template '), ...TEMPLATES.map(entry => button(ctx, `wft-pick-${entry.id}`, `${entry.id === template.id ? '●' : '○'} ${entry.title}`, () => (draftOf(ctx.state).selected = entry.id, hosts.get(ctx.state)?.invalidate())))], 'wft-pick'),
+    ...flow(ctx, TEMPLATES.map(entry => ({ key: `wft-pick-${entry.id}`, label: `${entry.id === template.id ? '●' : '○'} ${entry.title}`, onPress: () => (draftOf(ctx.state).selected = entry.id, hosts.get(ctx.state)?.invalidate()) })), 'wft-pick', ' template '),
     ctx.kit.Text({ dimColor: true, wrap: 'wrap', children: ` ${template.summary}` }),
-    ...template.params.map(param => paramRow(ctx, template, param, raw[param.id] ?? param.fallback)),
+    ...template.params.flatMap(param => paramRow(ctx, template, param, raw[param.id] ?? param.fallback)),
     text(ctx, ` dry run: ${plan.agents} agents in ${plan.phases} phases (${plan.rows.map(entry => `${clip(entry.title, 14)} ${entry.agents}`).join(' · ')}), at most ${plan.widest} at once`, { bold: true, ...(plan.isOverCap ? { color: THEME.bad } : {}) }),
     text(ctx, ' counts only: tokens, time and cost are not estimated, nothing has measured them for this template', { dimColor: true }),
     ...(plan.isOverCap ? [text(ctx, ` over the ${AGENTS_MAX}-agent ceiling: lower a count before launching`, { color: THEME.bad })] : []),

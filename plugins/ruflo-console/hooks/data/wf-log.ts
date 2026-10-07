@@ -3,6 +3,7 @@
  * whole phase merged by time), and the window of lines on screen, which follows the newest line or stays where the person put it.
  * Pure. "Follow" is a pin to the last line that the page's own refresh re-draws; it is not a stream, and the page says so.
  */
+import { isoOf } from './safe'
 import { cleanLine, type Entry, type Parsed } from './wf-activity'
 
 export type LogLevel = 'user' | 'assistant' | 'thinking' | 'tool' | 'error'
@@ -67,4 +68,4 @@ export function tailWindow(lines: readonly LogLine[], opts: { size?: number; sel
 }
 
 /** `20:03:45` in UTC, or `--:--:--` where the line has no timestamp. */
-export const clockOf = (atMs: number | undefined): string => (atMs === undefined ? '--:--:--' : new Date(atMs).toISOString().slice(11, 19))
+export const clockOf = (atMs: number | undefined): string => (atMs === undefined ? '--:--:--' : isoOf(atMs).slice(11, 19))

@@ -6,7 +6,9 @@
  * its transcripts are not read.
  */
 import { readBounded, under, type ReadCache, type ReaderFs } from './files'
-import { buildRun, parseTranscript, type RunInput, type TranscriptFacts, type WfRun } from './workflows'
+import { FactsIncr } from './wf-incr'
+import { beginWarm, warmActivity } from './wf-incr-store'
+import { buildRun, type RunInput, type TranscriptFacts, type WfRun } from './workflows'
 
 /** The engine refuses files over 4 MiB; below this a transcript is read whole. */
 export const TRANSCRIPT_CAP = 3_000_000
@@ -24,26 +26,23 @@ export type WorkflowRuns = { runs: WfRun[]; /** The project's folder under the c
 export const slugOf = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-')
 
 /**
- * What each transcript parsed to, by path. A refresh re-reads every run on a timer; JSON.parse of the same unchanged
- * transcripts was the whole cost of it (bench-swarmui.mjs: ~170 ms of ~170 ms at 6 runs x 60 agents). The read cache hands back
- * the same string while a file is unchanged, so the text itself is the key's check. Bounded, oldest out.
+ * What each transcript parsed to, by path. A refresh re-reads every run on a timer; JSON.parse of the same unchanged transcripts was the whole
+ * cost of it (bench-swarmui.mjs: ~170 ms of ~170 ms at 6 runs x 60 agents), and of a transcript that grew, the parse of the lines it already had.
+ * Each path keeps its parse state (data/wf-incr.ts): an unchanged text is the held answer, an appended one is parsed from the end of the old
+ * one (ADR-473), anything else is parsed whole. Bounded, oldest out.
  */
 const PARSED_MAX = MAX_RUNS * MAX_AGENTS * 2
-const parsed = new Map<string, { text: string; isTail: boolean; facts: TranscriptFacts }>()
+const parsed = new Map<string, FactsIncr>()
 
-function factsOf(path: string, text: string, isTail: boolean): TranscriptFacts {
-  const held = parsed.get(path)
-
-  if (held !== undefined && held.isTail === isTail && held.text === text) return held.facts
-
-  const facts = parseTranscript(text, isTail)
+function factsOf(path: string, text: string, isTail: boolean, tag = ''): TranscriptFacts {
+  const state = parsed.get(path) ?? new FactsIncr()
 
   parsed.delete(path)
-  parsed.set(path, { text, isTail, facts })
+  parsed.set(path, state)
 
   if (parsed.size > PARSED_MAX) parsed.delete(parsed.keys().next().value as string)
 
-  return facts
+  return state.update(text, isTail, tag).value
 }
 
 /**
@@ -119,7 +118,7 @@ export async function readWorkflowRuns(fs: WorkflowFs, cache: ReadCache, options
               if (transcript === null) skipped.push(path)
             }
 
-            const facts = kept ?? (transcript === null ? undefined : factsOf(path, transcript, isTail))
+            const facts = kept ?? (transcript === null ? undefined : factsOf(path, transcript, isTail, isTail ? `${size}:${listed?.mtimeMs ?? 0}` : ``))
 
             if (kept === undefined && isTail && facts !== undefined) rememberTail(path, size, listed?.mtimeMs, facts)
 
@@ -142,5 +141,23 @@ export async function readWorkflowRuns(fs: WorkflowFs, cache: ReadCache, options
     }),
   )
 
+  warmAhead(runs, cache)
+
   return { runs, root, capBytes: TRANSCRIPT_CAP, skipped, more: Math.max(0, found.length - chosen.length) }
+}
+
+/**
+ * Parses the transcripts this refresh read for the drill and its search before any frame asks (ADR-473), in the order the search walks them (live runs
+ * first, then each run's phases and agents), so the search finds them parsed. A small allowance a refresh; a transcript already current costs nothing.
+ */
+function warmAhead(runs: readonly WfRun[], cache: ReadCache): void {
+  beginWarm()
+
+  for (const run of [...runs.filter(candidate => candidate.running > 0), ...runs.filter(candidate => candidate.running === 0)]) {
+    for (const agent of run.phases.flatMap(phase => phase.agents)) {
+      const held = agent.ruflo !== undefined || agent.transcriptPath === undefined ? undefined : cache.get(agent.transcriptPath)
+
+      if (held !== undefined && 'text' in held && held.text !== '') warmActivity(agent.transcriptPath as string, held.text)
+    }
+  }
 }

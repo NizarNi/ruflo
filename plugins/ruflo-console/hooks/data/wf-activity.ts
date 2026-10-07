@@ -70,11 +70,11 @@ export type Parsed = {
 
 const asRecord = (value: unknown): Record<string, unknown> | null => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null)
 const SUMMARY_KEYS = ['command', 'file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'description', 'prompt', 'skill', 'subject'] as const
-const READ_TOOLS = new Set(['Read'])
-const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'NotebookEdit'])
-const WRITE_TOOLS = new Set(['Write'])
+export const READ_TOOLS = new Set(['Read'])
+export const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'NotebookEdit'])
+export const WRITE_TOOLS = new Set(['Write'])
 
-function summaryOf(input: unknown): string {
+export function summaryOf(input: unknown): string {
   const record = asRecord(input)
 
   if (record === null) return typeof input === 'string' ? cleanLine(input) : ''
@@ -84,7 +84,7 @@ function summaryOf(input: unknown): string {
   return ''
 }
 
-function pathOf(input: unknown): string | undefined {
+export function pathOf(input: unknown): string | undefined {
   const record = asRecord(input)
   const value = record?.file_path ?? record?.notebook_path
 
@@ -92,7 +92,7 @@ function pathOf(input: unknown): string | undefined {
 }
 
 /** A tool result's text: a string, or the text blocks of an array (an image is named, not drawn). */
-function resultText(content: unknown): string {
+export function resultText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
 
@@ -106,7 +106,7 @@ function resultText(content: unknown): string {
     .join('\n')
 }
 
-const stamp = (line: Record<string, unknown>): number | undefined => {
+export const stamp = (line: Record<string, unknown>): number | undefined => {
   const at = typeof line.timestamp === 'string' ? Date.parse(line.timestamp) : Number.NaN
 
   return Number.isFinite(at) ? at : undefined
